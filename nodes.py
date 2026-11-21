@@ -3,6 +3,7 @@ import ssl
 import sys
 import urllib.request
 from dataclasses import replace
+from typing import Callable, NamedTuple
 
 import certifi
 import torch
@@ -17,7 +18,7 @@ _VENDOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor")
 if _VENDOR not in sys.path:
     sys.path.insert(0, _VENDOR)
 
-from depth_pro_2 import PRESETS, create_model_and_transforms
+from depth_pro_2 import PRESETS, DepthPro2, create_model_and_transforms
 
 CHECKPOINT_FOLDER = "depth_pro2"
 CHECKPOINT_DIR = os.path.join(folder_paths.models_dir, CHECKPOINT_FOLDER)
@@ -36,6 +37,14 @@ PRECISIONS = {
     "fp32": torch.float32,
 }
 
+DepthPro2Model = io.Custom("DEPTH_PRO2_MODEL")
+
+
+class DepthPro2Bundle(NamedTuple):
+    model: DepthPro2
+    transform: Callable
+
+
 # far -> near ramp, matching the paper's red near, blue far visualization.
 COLORMAP = (
     (0.0, 0.0, 1.0),
@@ -44,8 +53,6 @@ COLORMAP = (
     (1.0, 1.0, 0.0),
     (1.0, 0.0, 0.0),
 )
-
-_loaded = {"key": None, "model": None, "transform": None}
 
 
 def _download(uri: str, path: str):
@@ -84,23 +91,17 @@ def _checkpoint(uri: str) -> str:
     return path
 
 
-def _load(name: str, precision: str, device: torch.device):
-    key = (name, precision, str(device))
-    if _loaded["key"] != key:
-        _loaded["model"] = None
-        _loaded["transform"] = None
-        mm.soft_empty_cache()
-        config = PRESETS[name]
-        config = replace(
-            config,
-            checkpoint_uri=_checkpoint(config.checkpoint_uri),
-            fov_checkpoint_uri=_checkpoint(config.fov_checkpoint_uri),
-        )
-        model, transform = create_model_and_transforms(
-            config, device=device, precision=PRECISIONS[precision]
-        )
-        _loaded.update(key=key, model=model, transform=transform)
-    return _loaded["model"], _loaded["transform"]
+def _load(name: str, precision: str) -> DepthPro2Bundle:
+    config = PRESETS[name]
+    config = replace(
+        config,
+        checkpoint_uri=_checkpoint(config.checkpoint_uri),
+        fov_checkpoint_uri=_checkpoint(config.fov_checkpoint_uri),
+    )
+    model, transform = create_model_and_transforms(
+        config, device=mm.get_torch_device(), precision=PRECISIONS[precision]
+    )
+    return DepthPro2Bundle(model, transform)
 
 
 def _colorize(gray: torch.Tensor) -> torch.Tensor:
@@ -111,6 +112,35 @@ def _colorize(gray: torch.Tensor) -> torch.Tensor:
     return lut[lo] * (1.0 - frac) + lut[lo + 1] * frac
 
 
+class DepthPro2ModelLoader(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="DepthPro2ModelLoader",
+            display_name="Load Depth Pro 2 Model",
+            category="model/loaders",
+            description=(
+                "Load an Apple Depth Pro 2 preset together with its field-of-view network. The "
+                "checkpoint is downloaded into models/depth_pro2 the first time it is used."
+            ),
+            inputs=[
+                io.Combo.Input("model", options=list(PRESETS), default="depthpro2-h"),
+                io.Combo.Input(
+                    "precision",
+                    options=list(PRECISIONS),
+                    default="auto",
+                    tooltip="Autocast dtype: auto is bfloat16 on GPU and float32 on CPU. Use fp16 on GPUs without bfloat16.",
+                    advanced=True,
+                ),
+            ],
+            outputs=[DepthPro2Model.Output()],
+        )
+
+    @classmethod
+    def execute(cls, model, precision) -> io.NodeOutput:
+        return io.NodeOutput(_load(model, precision))
+
+
 class DepthPro2Depth(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -119,12 +149,12 @@ class DepthPro2Depth(io.ComfyNode):
             display_name="Depth Pro 2",
             category="depth",
             description=(
-                "Metric monocular depth from Apple Depth Pro 2, returned as an image map "
+                "Metric monocular depth from a loaded Depth Pro 2 model, returned as an image map "
                 "normalized per frame (white near, black far)."
             ),
             inputs=[
+                DepthPro2Model.Input("model"),
                 io.Image.Input("image"),
-                io.Combo.Input("model", options=list(PRESETS), default="depthpro2-h"),
                 io.Float.Input(
                     "focal_length_px",
                     default=0.0,
@@ -143,13 +173,6 @@ class DepthPro2Depth(io.ComfyNode):
                     advanced=True,
                 ),
                 io.Combo.Input(
-                    "precision",
-                    options=list(PRECISIONS),
-                    default="auto",
-                    tooltip="Autocast dtype: auto is bfloat16 on GPU and float32 on CPU. Use fp16 on GPUs without bfloat16.",
-                    advanced=True,
-                ),
-                io.Combo.Input(
                     "output",
                     options=["grayscale", "color"],
                     default="grayscale",
@@ -160,8 +183,8 @@ class DepthPro2Depth(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, image, model, focal_length_px, max_side, precision, output) -> io.NodeOutput:
-        net, transform = _load(model, precision, mm.get_torch_device())
+    def execute(cls, model, image, focal_length_px, max_side, output) -> io.NodeOutput:
+        net, transform = model
         maps = []
         for frame in image:
             x = transform(frame.mul(255.0).round().clamp(0, 255).to(torch.uint8).cpu().numpy())
@@ -187,6 +210,7 @@ class DepthPro2Extension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
+            DepthPro2ModelLoader,
             DepthPro2Depth,
         ]
 
