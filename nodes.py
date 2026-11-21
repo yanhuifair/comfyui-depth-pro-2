@@ -3,9 +3,11 @@ import ssl
 import sys
 import urllib.request
 from dataclasses import replace
+from math import ceil
 from typing import Callable, NamedTuple
 
 import certifi
+import numpy as np
 import torch
 from torch.nn import functional as F
 from typing_extensions import override
@@ -41,8 +43,10 @@ DepthPro2Model = io.Custom("DEPTH_PRO2_MODEL")
 
 
 class DepthPro2Bundle(NamedTuple):
-    model: DepthPro2
+    model: "DepthPro2 | CoreMLDepthPro2"
     transform: Callable
+    # Core ML packages only run at the size they were exported for; a torch model takes any.
+    size: tuple[int, int] | None = None
 
 
 # far -> near ramp, matching the paper's red near, blue far visualization.
@@ -104,6 +108,188 @@ def _load(name: str, precision: str) -> DepthPro2Bundle:
     return DepthPro2Bundle(model, transform)
 
 
+COREML_SUFFIX = ".mlpackage"
+COREML_MISSING = "no Core ML package found"
+COMPUTE_UNITS = ("gpu", "neural_engine", "cpu", "all")
+
+_coreml_modules = None
+
+
+def _coreml():
+    """The Core ML framework and NSURL, with an install hint when the bridge is absent."""
+    global _coreml_modules
+    if _coreml_modules is None:
+        try:
+            import CoreML
+            from Foundation import NSURL
+        except ImportError as missing:
+            raise ValueError(
+                "Core ML needs the Python bridge for Apple's framework: "
+                "pip install pyobjc-framework-CoreML. It runs on macOS 15 and later, "
+                "on Apple silicon."
+            ) from missing
+        _coreml_modules = CoreML, NSURL
+    return _coreml_modules
+
+
+def _objc(result):
+    """Split a PyObjC (value, error) pair from a value a binding already hands back bare."""
+    return result if isinstance(result, tuple) else (result, None)
+
+
+def _ml_dtypes(CoreML) -> dict:
+    return {
+        int(CoreML.MLMultiArrayDataTypeFloat16): np.float16,
+        int(CoreML.MLMultiArrayDataTypeFloat32): np.float32,
+        int(CoreML.MLMultiArrayDataTypeDouble): np.float64,
+    }
+
+
+def _coreml_packages() -> list[str]:
+    """The .mlpackage folders sitting in a registered models/depth_pro2 directory."""
+    packages = []
+    for directory in folder_paths.get_folder_paths(CHECKPOINT_FOLDER):
+        if not os.path.isdir(directory):
+            continue
+        for entry in sorted(os.listdir(directory)):
+            path = os.path.join(directory, entry)
+            if entry.endswith(COREML_SUFFIX) and os.path.isdir(path) and entry not in packages:
+                packages.append(entry)
+    return packages
+
+
+def _coreml_package(name: str) -> str:
+    directories = folder_paths.get_folder_paths(CHECKPOINT_FOLDER)
+    for directory in directories:
+        path = os.path.join(directory, name)
+        if os.path.isdir(path):
+            return path
+    raise ValueError(f"{name} is not a .mlpackage in {' or '.join(directories)}.")
+
+
+def _coreml_transform(image: np.ndarray) -> torch.Tensor:
+    """RGB uint8 (H, W, 3) to a float (3, H, W) tensor in [0, 1], the range packages expect."""
+    return torch.from_numpy(np.ascontiguousarray(image)).permute(2, 0, 1).to(torch.float32).div_(255.0)
+
+
+def _numpy_copy(array) -> np.ndarray:
+    """Copy a Core ML output out of its buffer, which the engine strides wider than the shape."""
+    CoreML, _ = _coreml()
+    dtype = np.dtype(_ml_dtypes(CoreML)[int(array.dataType())])
+    block = {}
+
+    def keep(raw, size):
+        block["raw"] = bytes(raw)
+
+    array.getBytesWithHandler_(keep)
+    values = np.frombuffer(block["raw"], dtype=dtype)
+    strides = [int(stride) * dtype.itemsize for stride in array.strides()]
+    shape = tuple(int(dimension) for dimension in array.shape())
+    return np.array(np.lib.stride_tricks.as_strided(values, shape=shape, strides=strides))
+
+
+class CoreMLDepthPro2:
+    """A Core ML Depth Pro 2 package, run by the system Core ML runtime.
+
+    It answers the one call the depth node makes, ``infer``, but takes raw pixels rather than a
+    normalized tensor, and only at the size it was exported for: other inputs are scaled to cover
+    that size and center cropped, the way Apple's own demo does it.
+    """
+
+    def __init__(self, model, name: str, data_type: int, dtype, height: int, width: int):
+        self.model = model
+        self.name = name
+        self.data_type = data_type
+        self.dtype = dtype
+        self.height = height
+        self.width = width
+
+    @classmethod
+    def load(cls, package: str, compute_units: str) -> "CoreMLDepthPro2":
+        CoreML, NSURL = _coreml()
+        path = _coreml_package(package)
+        compiled, error = _objc(CoreML.MLModel.compileModelAtURL_error_(
+            NSURL.fileURLWithPath_(path), None))
+        if compiled is None:
+            raise ValueError(f"Core ML could not compile {package}: {error}")
+        config = CoreML.MLModelConfiguration.alloc().init()
+        config.setComputeUnits_({
+            "gpu": CoreML.MLComputeUnitsCPUAndGPU,
+            "neural_engine": CoreML.MLComputeUnitsCPUAndNeuralEngine,
+            "cpu": CoreML.MLComputeUnitsCPUOnly,
+            "all": CoreML.MLComputeUnitsAll,
+        }[compute_units])
+        model, error = _objc(CoreML.MLModel.modelWithContentsOfURL_configuration_error_(
+            compiled, config, None))
+        if model is None:
+            raise ValueError(
+                f"Core ML could not load {package}: {error}. Apple's published _w4 packages are "
+                "not loadable on macOS yet; export a stateless one with "
+                "python tools/export_coreml.py --size <W>x<H>."
+            )
+        description = model.modelDescription()
+        if len(description.stateDescriptionsByName() or {}):
+            raise ValueError(
+                f"{package} keeps earlier frames in its Core ML state, which this node does not "
+                "carry between frames. Export a stateless image package instead: "
+                "python tools/export_coreml.py --size <W>x<H>."
+            )
+        inputs = description.inputDescriptionsByName() or {}
+        if len(inputs) != 1:
+            raise ValueError(f"{package} takes {len(inputs)} inputs, expected one frame input.")
+        name, spec = next(iter(inputs.items()))
+        shape = [int(dimension) for dimension in spec.multiArrayConstraint().shape()]
+        if len(shape) != 4 or shape[1] != 3:
+            raise ValueError(f"{package} takes a {shape} input, expected a (1, 3, H, W) frame.")
+        data_type = int(spec.multiArrayConstraint().dataType())
+        dtype = _ml_dtypes(CoreML).get(data_type)
+        if dtype is None:
+            raise ValueError(f"{package} takes a {data_type} input, expected floating point pixels.")
+        return cls(model, name, data_type, dtype, shape[-2], shape[-1])
+
+    def infer(self, x: torch.Tensor, f_px: float | None = None) -> dict:
+        """Inverse depth (H, W) for one RGB frame in [0, 1], cover cropped to the package size.
+
+        ``f_px`` is accepted for the torch model's signature: the network predicts inverse depth
+        normalized by the focal length, so it does not use one.
+        """
+        CoreML, _ = _coreml()
+        height, width = x.shape[-2:]
+        if (height, width) != (self.height, self.width):
+            scale = max(self.width / width, self.height / height)
+            x = F.interpolate(
+                x.unsqueeze(0),
+                size=(ceil(height * scale), ceil(width * scale)),
+                mode="bilinear",
+                align_corners=False,
+                antialias=scale < 1.0,
+            )[0]
+            top = (x.shape[-2] - self.height) // 2
+            left = (x.shape[-1] - self.width) // 2
+            x = x[..., top:top + self.height, left:left + self.width]
+        frame = np.ascontiguousarray(x.detach().cpu().numpy()[None], dtype=self.dtype)
+        strides = [stride // frame.itemsize for stride in frame.strides]
+        array = _objc(CoreML.MLMultiArray.alloc().initWithBytesNoCopy_shape_dataType_strides_mutableShapedBufferProvider_(
+            frame.ctypes.data, list(frame.shape), self.data_type, strides, None))[0]
+        features, error = _objc(CoreML.MLDictionaryFeatureProvider.alloc().initWithDictionary_error_(
+            {self.name: CoreML.MLFeatureValue.featureValueWithMultiArray_(array)}, None))
+        if features is None:
+            raise ValueError(f"Core ML could not bind the frame: {error}")
+        prediction, error = self.model.predictionFromFeatures_options_error_(features, None, None)
+        if prediction is None:
+            raise ValueError(f"Core ML inference failed: {error}")
+        inverse = prediction.featureValueForName_("inverse_depth").multiArrayValue()
+        if inverse is None:
+            raise ValueError("The package returned no inverse_depth multi array.")
+        inverse = _numpy_copy(inverse)[0].astype(np.float32)
+        return {"inverse_depth": torch.from_numpy(inverse)}
+
+
+def _load_coreml(package: str, compute_units: str) -> DepthPro2Bundle:
+    net = CoreMLDepthPro2.load(package, compute_units)
+    return DepthPro2Bundle(net, _coreml_transform, (net.height, net.width))
+
+
 def _colorize(gray: torch.Tensor) -> torch.Tensor:
     lut = torch.tensor(COLORMAP, device=gray.device, dtype=gray.dtype)
     idx = gray * (len(COLORMAP) - 1)
@@ -141,6 +327,48 @@ class DepthPro2ModelLoader(io.ComfyNode):
         return io.NodeOutput(_load(model, precision))
 
 
+class DepthPro2CoreMLModelLoader(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        packages = _coreml_packages() or [COREML_MISSING]
+        return io.Schema(
+            node_id="DepthPro2CoreMLModelLoader",
+            display_name="Load Depth Pro 2 Core ML",
+            category="model/loaders",
+            description=(
+                "Load a Core ML Depth Pro 2 package from models/depth_pro2 and run it on the Apple "
+                "silicon GPU. Export one with python tools/export_coreml.py; refresh the node list "
+                "after adding it. Apple's published _w4 packages are not loadable on macOS yet."
+            ),
+            inputs=[
+                io.Combo.Input(
+                    "package",
+                    options=packages,
+                    default=packages[0],
+                    tooltip="A .mlpackage folder in models/depth_pro2, at the size you want the depth map.",
+                ),
+                io.Combo.Input(
+                    "compute_units",
+                    options=list(COMPUTE_UNITS),
+                    default="gpu",
+                    tooltip="Where Core ML runs the package. GPU is the fast one for Depth Pro 2; the neural engine measured slower.",
+                    advanced=True,
+                ),
+            ],
+            outputs=[DepthPro2Model.Output()],
+        )
+
+    @classmethod
+    def execute(cls, package, compute_units) -> io.NodeOutput:
+        if package == COREML_MISSING:
+            raise ValueError(
+                "No Core ML package here yet. Create one with "
+                "python tools/export_coreml.py --preset depthpro2-s --size 854x480, put it in "
+                "models/depth_pro2 and refresh the node list."
+            )
+        return io.NodeOutput(_load_coreml(package, compute_units))
+
+
 class DepthPro2Depth(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -169,7 +397,7 @@ class DepthPro2Depth(io.ComfyNode):
                     default=0,
                     min=0,
                     max=16384,
-                    tooltip="Downscale the longest side to this many pixels before inference, 0 keeps full resolution. Shorten it only if the image does not fit in memory; a given focal length is scaled the same way.",
+                    tooltip="Downscale the longest side to this many pixels before inference, 0 keeps full resolution. Shorten it only if the image does not fit in memory; a given focal length is scaled the same way. A Core ML package ignores it and runs at the size it was exported for.",
                     advanced=True,
                 ),
                 io.Combo.Input(
@@ -184,13 +412,13 @@ class DepthPro2Depth(io.ComfyNode):
 
     @classmethod
     def execute(cls, model, image, focal_length_px, max_side, output) -> io.NodeOutput:
-        net, transform = model
+        net, transform, size = model
         maps = []
         for frame in image:
             x = transform(frame.mul(255.0).round().clamp(0, 255).to(torch.uint8).cpu().numpy())
             f_px = focal_length_px if focal_length_px > 0 else None
             height, width = x.shape[-2:]
-            if 0 < max_side < max(height, width):
+            if size is None and 0 < max_side < max(height, width):
                 scale = max_side / max(height, width)
                 x = F.interpolate(
                     x.unsqueeze(0),
@@ -211,6 +439,7 @@ class DepthPro2Extension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             DepthPro2ModelLoader,
+            DepthPro2CoreMLModelLoader,
             DepthPro2Depth,
         ]
 
