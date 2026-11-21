@@ -86,3 +86,9 @@ The node code is MIT, see [LICENSE](LICENSE). The vendored `depth_pro_2` sources
 `vendor/LICENSE`. The model weights are
 [research-use only](https://github.com/apple-aiml-research/ml-depth-pro-2/blob/main/LICENSE_MODEL).
 Check both before shipping anything made with them.
+
+## Support
+
+WeChat tip code, if this node saved you some time:
+
+![Fair's WeChat tip code](examples/tip.jpg)

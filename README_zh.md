@@ -81,3 +81,9 @@ examples/            上文截图
 本仓库的节点代码为 MIT，见 [LICENSE](LICENSE)；Vendored 的 `depth_pro_2` 源码版权归 Apple，许可证见
 `vendor/LICENSE`；模型权重[仅限研究用途](https://github.com/apple-aiml-research/ml-depth-pro-2/blob/main/LICENSE_MODEL)。
 商用或发布成果前请确认这两份条款。
+
+## 赞赏
+
+如果这个节点帮到了你，可以请我喝杯咖啡：
+
+![Fair 的赞赏码](examples/tip.jpg)
