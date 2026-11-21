@@ -3,8 +3,14 @@
 English | [简体中文](README_zh.md)
 
 ComfyUI node for [Apple Depth Pro 2](https://github.com/apple-aiml-research/ml-depth-pro-2):
-sharp monocular depth from a single photo. Takes an `IMAGE`, returns a depth map as `IMAGE`
-(inverse depth normalized per frame, white near / black far).
+sharp metric monocular depth from a single photo, at full resolution. Takes an `IMAGE`, returns a
+depth map as `IMAGE` (inverse depth normalized per frame, white near / black far).
+
+Project page, with the paper, the comparison videos and the benchmarks:
+[apple-aiml-research.github.io/ml-depth-pro-2](https://apple-aiml-research.github.io/ml-depth-pro-2/).
+Upstream: [paper](https://arxiv.org/abs/2611.26603) ·
+[code](https://github.com/apple-aiml-research/ml-depth-pro-2) ·
+[weights](https://huggingface.co/apple/DepthPro2).
 
 ![Load Image → Depth Pro 2 → Preview Image: a 1440×1080 photo and its color depth map](examples/example.png)
 
@@ -53,8 +59,9 @@ are used for both lookup and download.
 - The output is a normalized visualization map, not metric depth in meters. See the upstream repo
   if you need raw metric depth.
 - Output resolution is the inference resolution: the input size, or the `max_side`-reduced size.
-- Batch frames are predicted independently, each with its own focal length, as in the reference
-  implementation; frames in a batch are not fused with each other.
+- Frames are predicted one at a time, each with its own focal length. The temporally consistent
+  video results on the project page come from upstream's multi-view path, so a batch here has no
+  consistency between frames.
 - The field-of-view head is loaded for every preset, even when `focal_length_px` is supplied.
 - Out of memory: lower `max_side`. A supplied focal length is scaled by the same factor.
 

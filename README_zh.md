@@ -3,8 +3,14 @@
 [English](README.md) | 简体中文
 
 [Apple Depth Pro 2](https://github.com/apple-aiml-research/ml-depth-pro-2) 的 ComfyUI 节点：
-单张照片估出边缘锐利的深度。输入 `IMAGE`，输出同样为 `IMAGE` 的深度图
+单张照片估出边缘锐利的度量深度，全分辨率推理。输入 `IMAGE`，输出同样为 `IMAGE` 的深度图
 （逆深度，按帧归一化，白近黑远）。
+
+项目主页有论文、对比视频和评测结果：
+[apple-aiml-research.github.io/ml-depth-pro-2](https://apple-aiml-research.github.io/ml-depth-pro-2/)。
+上游链接：[论文](https://arxiv.org/abs/2611.26603) ·
+[代码](https://github.com/apple-aiml-research/ml-depth-pro-2) ·
+[权重](https://huggingface.co/apple/DepthPro2)。
 
 ![Load Image → Depth Pro 2 → Preview Image：1440×1080 原图与彩色深度图](examples/example.png)
 
@@ -50,7 +56,8 @@ pip install -r comfyui-depth-pro-2/requirements.txt
 
 - 输出是按帧归一化的可视化深度图，不是以米为单位的度量深度；需要原始度量深度请看上游仓库。
 - 输出分辨率等于推理分辨率，即原图尺寸，或按 `max_side` 缩小后的尺寸。
-- 批次内每帧独立预测、各自使用自己的焦距，与参考实现一致；帧与帧之间不做融合。
+- 节点逐帧独立推理，各帧使用自己的焦距；项目主页上那种时序一致的视频效果来自上游的多帧联合推理，
+  因此 ComfyUI 里的批次帧与帧之间没有时序一致性。
 - 即使填了 `focal_length_px`，视场角头也会一并加载。
 - 显存不足：调小 `max_side`，填入的焦距会按同样比例缩放。
 
