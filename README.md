@@ -38,6 +38,27 @@ Connect **Load Depth Pro 2 Model** to the `model` socket of **Depth Pro 2**, fee
 loader can serve several depth nodes, and the weights stay loaded until ComfyUI drops them from the
 node cache.
 
+## Video
+
+**Depth Pro 2 Video** takes a `VIDEO` and returns a `VIDEO`, so ComfyUI's own nodes are all you
+need: **Load Video** → **Depth Pro 2 Video** → **Save Video**. The frame rate and the audio come from
+the source, and the `images` socket is there if you want the frames on their own.
+
+The difference from pushing frames through the photo node one by one is that a clip of `window`
+frames is predicted together, so neighbouring frames attend to each other and the map stops
+crawling. Measured on a 12-frame clip at 512×512 with `depthpro2-s`, as the mean absolute difference
+between consecutive normalized maps:
+
+| How the clip is predicted | frame-to-frame change |
+| --- | --- |
+| frame by frame | 0.056 |
+| unbuffered, window 4 | 0.052 |
+| buffered, window 4, overlap 2 | 0.044 |
+| buffered, window 16, overlap 4 (default) | 0.030 |
+
+Memory grows with `window`: that many frames go through the network at once. That is why `max_side`
+starts at 1024 on this node instead of at full resolution.
+
 ## Models
 
 | Preset | File | Size | Notes |
@@ -101,7 +122,6 @@ Swift, so exporting your own with the command above is the only way in for now.
 | --- | --- | --- |
 | `model` | `depthpro2-h` | Preset, see above. |
 | `precision` | `auto` | Autocast dtype: `auto` is bfloat16 on GPU and float32 on CPU. Use `fp16` on GPUs without bfloat16. Advanced. |
-
 ### Load Depth Pro 2 Core ML
 
 | Input | Default | Description |
@@ -119,15 +139,33 @@ Swift, so exporting your own with the command above is the only way in for now.
 | `max_side` | `0` | Downscale the longest side to this many pixels before inference; `0` keeps full resolution. A Core ML package ignores it and runs at its own size. Advanced. |
 | `output` | `grayscale` | `grayscale`: inverse depth, white near. `color`: depth ramp, red near, blue far. |
 
+### Depth Pro 2 Video
+
+| Input | Default | Description |
+| --- | --- | --- |
+| `model` | — | `DEPTH_PRO2_MODEL` from either loader. |
+| `video` | — | `VIDEO`, typically from **Load Video**. |
+| `focal_length_px` | `0` | Focal length in pixels for the whole clip; `0` takes the median of the estimates over the first window. |
+| `window` | `16` | Frames attended together. Larger is steadier and costs more memory; `1` is frame by frame. |
+| `overlap` | `4` | Frames two neighbouring clips share, cross-faded at the seam. Must stay below `window`; ignored by `unbuffered`. Advanced. |
+| `mode` | `buffered` | `buffered` predicts overlapping clips, so a frame also sees later frames; `unbuffered` predicts each frame as it arrives, from itself and the earlier ones. Advanced. |
+| `max_side` | `1024` | Downscale the longest side to this many pixels before inference; `0` keeps full resolution. A Core ML package ignores it. Advanced. |
+| `output` | `grayscale` | `grayscale`: inverse depth, white near. `color`: depth ramp, red near, blue far. |
+
+Outputs: `video` (`VIDEO`, with the source frame rate and audio), `images` (`IMAGE` batch), `fps`.
+
 ## Notes
 
 - The output is a normalized visualization map, not metric depth in meters. See the upstream repo
   if you need raw metric depth.
-- Output resolution is the inference resolution: the input size, or the `max_side`-reduced size. A Core ML
-  package returns the size it was exported for.
-- Frames are predicted one at a time, each with its own focal length. The temporally consistent
-  video results on the project page come from upstream's multi-view path, so a batch here has no
-  consistency between frames.
+- Output resolution is the inference resolution: the input size, or the `max_side`-reduced size. A
+  Core ML package returns the size it was exported for.
+- The photo node predicts each frame of a batch on its own, each with its own focal length, so a
+  batch of video frames has no consistency between them — even when it comes from
+  **Get Video Components**. **Depth Pro 2 Video** is the temporal path, attending a clip together
+  the way the video results on the project page do.
+- A Core ML package keeps no state between frames, so the video node runs it frame by frame: no clip
+  attention, and the whole clip gets the map size the package was exported for.
 - The field-of-view head is loaded for every preset, even when `focal_length_px` is supplied.
 - Out of memory: lower `max_side`. A supplied focal length is scaled by the same factor.
 

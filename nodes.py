@@ -14,7 +14,7 @@ from typing_extensions import override
 
 import folder_paths
 import comfy.model_management as mm
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.latest import ComfyExtension, InputImpl, Types, io
 
 _VENDOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor")
 if _VENDOR not in sys.path:
@@ -298,6 +298,27 @@ def _colorize(gray: torch.Tensor) -> torch.Tensor:
     return lut[lo] * (1.0 - frac) + lut[lo + 1] * frac
 
 
+def _normalized(frame: torch.Tensor, transform: Callable) -> torch.Tensor:
+    """One IMAGE row to the float (3, H, W) tensor a backend expects."""
+    return transform(frame.mul(255.0).round().clamp(0, 255).to(torch.uint8).cpu().numpy())
+
+
+def _fit(x: torch.Tensor, max_side: int) -> tuple[torch.Tensor, float]:
+    """Shorten an (3, H, W) frame to max_side, with the factor a focal length scales by."""
+    side = max(x.shape[-2:])
+    if not 0 < max_side < side:
+        return x, 1.0
+    scale = max_side / side
+    size = [round(dimension * scale) for dimension in x.shape[-2:]]
+    return F.interpolate(x.unsqueeze(0), size=size, mode="bilinear", align_corners=False)[0], scale
+
+
+def _map(inverse: torch.Tensor, output: str) -> torch.Tensor:
+    """An inverse depth map as an (H, W, 3) image, normalized over this frame."""
+    gray = (inverse - inverse.amin()) / (inverse.amax() - inverse.amin()).clamp_min(1e-12)
+    return _colorize(gray) if output == "color" else gray.unsqueeze(-1).repeat(1, 1, 3)
+
+
 class DepthPro2ModelLoader(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -415,23 +436,112 @@ class DepthPro2Depth(io.ComfyNode):
         net, transform, size = model
         maps = []
         for frame in image:
-            x = transform(frame.mul(255.0).round().clamp(0, 255).to(torch.uint8).cpu().numpy())
-            f_px = focal_length_px if focal_length_px > 0 else None
-            height, width = x.shape[-2:]
-            if size is None and 0 < max_side < max(height, width):
-                scale = max_side / max(height, width)
-                x = F.interpolate(
-                    x.unsqueeze(0),
-                    size=(round(height * scale), round(width * scale)),
-                    mode="bilinear",
-                    align_corners=False,
-                )[0]
-                if f_px is not None:
-                    f_px *= scale
-            inverse = net.infer(x, f_px=f_px)["inverse_depth"]
-            gray = (inverse - inverse.amin()) / (inverse.amax() - inverse.amin()).clamp_min(1e-12)
-            maps.append(_colorize(gray) if output == "color" else gray.unsqueeze(-1).repeat(1, 1, 3))
+            x = _normalized(frame, transform)
+            scale = 1.0
+            if size is None:  # A Core ML package runs at the size it was exported for.
+                x, scale = _fit(x, max_side)
+            f_px = focal_length_px * scale if focal_length_px > 0 else None
+            maps.append(_map(net.infer(x, f_px=f_px)["inverse_depth"], output))
         return io.NodeOutput(torch.stack(maps).to(mm.intermediate_device()))
+
+
+class DepthPro2Video(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="DepthPro2Video",
+            display_name="Depth Pro 2 Video",
+            category="depth",
+            description=(
+                "Depth for a whole video, with neighbouring frames attended together so the map "
+                "stops flickering. Frame rate and audio of the source are carried over."
+            ),
+            inputs=[
+                DepthPro2Model.Input("model"),
+                io.Video.Input("video", tooltip="The clip to measure, straight from Load Video."),
+
+                io.Float.Input(
+                    "focal_length_px",
+                    default=0.0,
+                    min=0.0,
+                    max=100000.0,
+                    step=1.0,
+                    round=0.1,
+                    tooltip="Focal length in pixels, shared by the clip. 0 takes the median of the estimates over the first window.",
+                ),
+                io.Int.Input(
+                    "window",
+                    default=16,
+                    min=1,
+                    max=256,
+                    tooltip="Frames attended together. More frames are steadier and cost more memory: a window of them is through the network at once. 1 is frame by frame.",
+                ),
+                io.Int.Input(
+                    "overlap",
+                    default=4,
+                    min=0,
+                    max=255,
+                    tooltip="Frames two neighbouring clips share, cross faded at the seam. Less than window. Ignored by the unbuffered mode.",
+                    advanced=True,
+                ),
+                io.Combo.Input(
+                    "mode",
+                    options=["buffered", "unbuffered"],
+                    default="buffered",
+                    tooltip="buffered predicts overlapping clips, so a frame also sees the frames after it: steadiest. unbuffered predicts each frame as it arrives, from itself and the ones before it: cheaper, needs no overlap.",
+                    advanced=True,
+                ),
+                io.Int.Input(
+                    "max_side",
+                    default=1024,
+                    min=0,
+                    max=16384,
+                    tooltip="Downscale the longest side to this many pixels before inference, 0 keeps full resolution. Video costs memory fast: a whole window is inferred at once. A given focal length is scaled the same way, and a Core ML package ignores this.",
+                    advanced=True,
+                ),
+                io.Combo.Input(
+                    "output",
+                    options=["grayscale", "color"],
+                    default="grayscale",
+                    tooltip="grayscale: inverse depth, white near. color: depth ramp, red near, blue far.",
+                ),
+            ],
+            outputs=[
+                io.Video.Output(display_name="video"),
+                io.Image.Output(display_name="images"),
+                io.Float.Output(display_name="fps"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, model, video, focal_length_px, window, overlap, mode, max_side, output) -> io.NodeOutput:
+        net, transform, size = model
+        components = video.get_components()
+        frames = components.images
+        if frames.shape[0] == 0:
+            raise ValueError("The video holds no frames.")
+        # Frames of one video share a size, so the first one settles the scale for all of them.
+        limit = 0 if size is not None else max_side  # A Core ML package runs at its own size.
+        probe, scale = _fit(_normalized(frames[0], transform), limit)
+        f_px = focal_length_px * scale if focal_length_px > 0 else None
+
+        def prepared():
+            yield probe
+            for frame in frames[1:]:
+                yield _fit(_normalized(frame, transform), limit)[0]
+
+        if size is None:
+            predictions = net.infer_video(prepared(), window=window, overlap=overlap, f_px=f_px, mode=mode)
+        else:  # Core ML packages hold no state between frames, so nothing is attended together.
+            predictions = (net.infer(frame, f_px=f_px) for frame in prepared())
+        maps = [_map(prediction["inverse_depth"], output) for prediction in predictions]
+        images = torch.stack(maps).to(mm.intermediate_device())
+        return io.NodeOutput(
+            InputImpl.VideoFromComponents(Types.VideoComponents(
+                images=images, audio=components.audio, frame_rate=components.frame_rate)),
+            images,
+            float(components.frame_rate),
+        )
 
 
 class DepthPro2Extension(ComfyExtension):
@@ -441,6 +551,7 @@ class DepthPro2Extension(ComfyExtension):
             DepthPro2ModelLoader,
             DepthPro2CoreMLModelLoader,
             DepthPro2Depth,
+            DepthPro2Video,
         ]
 
 

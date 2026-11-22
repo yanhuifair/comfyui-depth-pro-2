@@ -35,6 +35,23 @@ pip install -r comfyui-depth-pro-2/requirements.txt
 再接给任意图片节点（保存、ControlNet、转遮罩……）。一个加载器可以同时喂多个深度节点；权重会留在
 ComfyUI 的节点缓存里，直到被缓存回收。
 
+## 视频
+
+**Depth Pro 2 Video** 输入 `VIDEO`、输出 `VIDEO`，配 ComfyUI 自带节点就够：**Load Video** →
+**Depth Pro 2 Video** → **Save Video**。帧率和音轨沿用源视频，另外还输出 `images`，方便只要帧序列的场合。
+
+它和把帧一帧丢给拍照节点的区别在于：一次联合推理 `window` 帧，相邻帧互相注意到，深度图不再乱爬。
+用 `depthpro2-s` 跑一段 12 帧、512×512 的测试片段，按相邻归一化深度图的平均绝对差衡量：
+
+| 推理方式 | 帧间变化 |
+| --- | --- |
+| 逐帧独立 | 0.056 |
+| unbuffered，window 4 | 0.052 |
+| buffered，window 4，overlap 2 | 0.044 |
+| buffered，window 16，overlap 4（默认） | 0.030 |
+
+显存随 `window` 增长：一次要过 `window` 帧的网络，所以这个节点的 `max_side` 默认是 1024，而不是全分辨率。
+
 ## 模型
 
 | 预设 | 文件 | 体积 | 说明 |
@@ -112,12 +129,28 @@ Apple 自己发布的 Core ML 包（[`apple/DepthPro2-coreml`](https://huggingfa
 | `max_side` | `0` | 推理前把最长边缩到该像素数，`0` 表示保持原分辨率；Core ML 包忽略它，按包自身的尺寸推理。高级选项。 |
 | `output` | `grayscale` | `grayscale`：逆深度，白色为近；`color`：深度色带，红近蓝远。 |
 
+### Depth Pro 2 Video
+
+| 输入 | 默认 | 说明 |
+| --- | --- | --- |
+| `model` | — | 任一加载器输出的 `DEPTH_PRO2_MODEL`。 |
+| `video` | — | `VIDEO`，一般来自 **Load Video**。 |
+| `focal_length_px` | `0` | 整段视频共用的焦距（像素）；`0` 取第一个窗口估算值的中位数。 |
+| `window` | `16` | 联合推理的帧数。越大越稳、越吃显存；`1` 就是逐帧独立。 |
+| `overlap` | `4` | 相邻两个片段共享的帧数，接缝处做交叉淡入淡出；必须小于 `window`，`unbuffered` 忽略它。高级选项。 |
+| `mode` | `buffered` | `buffered` 推重叠片段，因此每帧还能看到其后的帧；`unbuffered` 靠 KV cache，每帧只用自己的和之前的帧。高级选项。 |
+| `max_side` | `1024` | 推理前把最长边缩到该像素数，`0` 表示保持原分辨率；Core ML 包忽略它。高级选项。 |
+| `output` | `grayscale` | `grayscale`：逆深度，白色为近；`color`：深度色带，红近蓝远。 |
+
+输出：`video`（`VIDEO`，带源视频的帧率与音轨）、`images`（`IMAGE` 批次）、`fps`。
+
 ## 说明
 
 - 输出是按帧归一化的可视化深度图，不是以米为单位的度量深度；需要原始度量深度请看上游仓库。
 - 输出分辨率等于推理分辨率，即原图尺寸，或按 `max_side` 缩小后的尺寸；Core ML 包输出的是它导出时的尺寸。
-- 节点逐帧独立推理，各帧使用自己的焦距；项目主页上那种时序一致的视频效果来自上游的多帧联合推理，
-  因此 ComfyUI 里的批次帧与帧之间没有时序一致性。
+- 拍照节点对批次里的每一帧都独立推理、各自估焦距，所以视频的帧序列从这里过是没有时序一致性的，
+  哪怕它来自 **Get Video Components**；时序通路是 **Depth Pro 2 Video**，做法和项目主页上的视频结果一致。
+- Core ML 包在帧之间不保存状态，视频节点只能逐帧跑它：没有片段联合注意力，而且整段都按包导出时的尺寸输出。
 - 即使填了 `focal_length_px`，视场角头也会一并加载。
 - 显存不足：调小 `max_side`，填入的焦距会按同样比例缩放。
 
