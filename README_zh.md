@@ -12,7 +12,7 @@
 [代码](https://github.com/apple-aiml-research/ml-depth-pro-2) ·
 [权重](https://huggingface.co/apple/DepthPro2)。
 
-![1440×1080 照片的彩色深度图，红色为近、蓝色为远](examples/example.png)
+![ComfyUI 里的完整连线：Load Image 和 Load Depth Pro 2 Model 接入 Depth Pro 2，Preview Image 显示 1440×1080 照片的灰度深度图](examples/example.png)
 
 ## 安装
 

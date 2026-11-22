@@ -13,7 +13,7 @@ Upstream: [paper](https://arxiv.org/abs/2611.26603) ·
 [code](https://github.com/apple-aiml-research/ml-depth-pro-2) ·
 [weights](https://huggingface.co/apple/DepthPro2).
 
-![Color depth map of a 1440×1080 photo, red near and blue far](examples/example.png)
+![The workflow in ComfyUI: Load Image and Load Depth Pro 2 Model wired into Depth Pro 2, previewing a grayscale depth map of a 1440×1080 photo](examples/example.png)
 
 ## Install
 
