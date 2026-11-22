@@ -57,7 +57,12 @@ between consecutive normalized maps:
 | buffered, window 16, overlap 4 (default) | 0.030 |
 
 Memory grows with `window`: that many frames go through the network at once. That is why `max_side`
-starts at 1024 on this node instead of at full resolution.
+starts at 1024 on this node instead of at full resolution. For scale, `depthpro2-h` took 6 s and
+3.7 GB on Apple silicon for 16 frames at 1024×768 with the default window.
+
+Compute follows the clip stride rather than the frame count: window 16 with overlap 4 advances 12
+frames per pass, so a frame is computed about 1.3 times, while window 4 with overlap 3 advances one
+frame per pass and computes each frame four times — 6 s against 23 s on that clip.
 
 ## Models
 
@@ -167,7 +172,8 @@ Outputs: `video` (`VIDEO`, with the source frame rate and audio), `images` (`IMA
 - A Core ML package keeps no state between frames, so the video node runs it frame by frame: no clip
   attention, and the whole clip gets the map size the package was exported for.
 - The field-of-view head is loaded for every preset, even when `focal_length_px` is supplied.
-- Out of memory: lower `max_side`. A supplied focal length is scaled by the same factor.
+- Out of memory: lower `max_side`; on the video node lower `window` first, it is the multiplier. A
+  supplied focal length is scaled by the same factor.
 
 ## Troubleshooting
 

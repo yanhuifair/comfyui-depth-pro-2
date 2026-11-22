@@ -51,6 +51,10 @@ ComfyUI 的节点缓存里，直到被缓存回收。
 | buffered，window 16，overlap 4（默认） | 0.030 |
 
 显存随 `window` 增长：一次要过 `window` 帧的网络，所以这个节点的 `max_side` 默认是 1024，而不是全分辨率。
+做个参考：Apple 芯片上跑 `depthpro2-h`、16 帧 1024×768、默认窗口，耗时 6 s、占 3.7 GB。
+
+算力取决于片段步长而不是帧数：window 16 / overlap 4 每趟前进 12 帧，每帧大约算 1.3 遍；window 4 /
+overlap 3 每趟只前进 1 帧，每帧要算 4 遍——同一段素材上前者 6 s、后者 23 s。
 
 ## 模型
 
@@ -152,7 +156,7 @@ Apple 自己发布的 Core ML 包（[`apple/DepthPro2-coreml`](https://huggingfa
   哪怕它来自 **Get Video Components**；时序通路是 **Depth Pro 2 Video**，做法和项目主页上的视频结果一致。
 - Core ML 包在帧之间不保存状态，视频节点只能逐帧跑它：没有片段联合注意力，而且整段都按包导出时的尺寸输出。
 - 即使填了 `focal_length_px`，视场角头也会一并加载。
-- 显存不足：调小 `max_side`，填入的焦距会按同样比例缩放。
+- 显存不足：先调小 `window`（它是乘数），再调小 `max_side`；填入的焦距会按同样比例缩放。
 
 ## 常见问题
 
