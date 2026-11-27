@@ -48,7 +48,8 @@ ComfyUI 的节点缓存里，直到被缓存回收。
 
 两个估焦距节点都只吃 `IMAGE`，逐帧推理后返回批次中位数，各有两个 `FLOAT` 输出：`focal_length_px` 和
 `focal_length_mm`。像素值可以接到深度节点的 `focal_length_px` 输入口；毫米值是等效全画幅的镜头焦距，按
-`f_px × sensor_width_mm / image_width_px` 换算，默认传感器宽度 36 mm（换相机就改 `sensor_width_mm`）。
+`f_px × sensor_width_mm / image_width_px` 换算，默认传感器宽度 36 mm（换相机就改 `sensor_width_mm`；填
+`auto` 同样按 36 mm 算，兼容这个输入改成数字之前保存的工作流）。
 Core ML 视场角模型是在固定的 896x512 输入上估像素焦距，所以它的毫米值以 896 px 为宽度基准，与原图
 怎么裁剪无关。加载好的模型会像深度加载器一样缓存复用。
 
@@ -193,7 +194,7 @@ uv run --python 3.13 --with coremltools --with timm --with av \
 | --- | --- | --- |
 | `model` | — | **Load Depth Pro 2 Focal Model** 输出的 `DEPTH_PRO2_FOCAL_MODEL`。 |
 | `image` | — | `IMAGE` 批次，逐帧推理。 |
-| `sensor_width_mm` | `36.0` | 换算 `focal_length_mm` 用的传感器宽度（mm）；36 mm 即全画幅 / 35mm 等效。高级选项。 |
+| `sensor_width_mm` | `36` | 文本框：换算 `focal_length_mm` 用的传感器宽度（mm）；填 `auto` 也按 36 mm（全画幅 / 35mm 等效）算。高级选项。 |
 
 输出：`focal_length_px` 和 `focal_length_mm`（`FLOAT`），均为批次中位数。
 
@@ -203,7 +204,7 @@ uv run --python 3.13 --with coremltools --with timm --with av \
 | --- | --- | --- |
 | `model` | — | **Load Depth Pro 2 Focal Core ML** 输出的 `DEPTH_PRO2_FOCAL_COREML_MODEL`。 |
 | `image` | — | `IMAGE` 批次；每帧放大裁剪到 896x512 后逐帧推理。 |
-| `sensor_width_mm` | `36.0` | 换算 `focal_length_mm` 用的传感器宽度（mm）；36 mm 即全画幅 / 35mm 等效。高级选项。 |
+| `sensor_width_mm` | `36` | 文本框：换算 `focal_length_mm` 用的传感器宽度（mm）；填 `auto` 也按 36 mm（全画幅 / 35mm 等效）算。高级选项。 |
 
 输出：`focal_length_px`（896x512 输入上的像素焦距）和 `focal_length_mm`（`FLOAT`），均为批次中位数。
 

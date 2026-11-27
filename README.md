@@ -53,7 +53,8 @@ Both estimator nodes take an `IMAGE`, estimate each frame separately, and return
 as two `FLOAT`s: `focal_length_px` and `focal_length_mm`. The pixel value feeds a depth node's
 `focal_length_px` socket; the millimetre value is a full-frame-equivalent lens focal length, computed
 as `f_px × sensor_width_mm / image_width_px` with a default 36 mm sensor (change `sensor_width_mm`
-for another camera). The Core ML FOV model estimates pixels on its fixed 896x512 input, so its
+for another camera; `auto` is accepted too and means 36, for workflows saved before this input was
+a number). The Core ML FOV model estimates pixels on its fixed 896x512 input, so its
 millimetre value uses 896 px as the width; the millimetre result is independent of how the source
 frame was cropped. The loaded model stays cached between runs, like the depth loader's weights.
 
@@ -210,7 +211,7 @@ Output: `DEPTH_PRO2_FOCAL_COREML_MODEL`, for **Depth Pro 2 Focal (Core ML)**.
 | --- | --- | --- |
 | `model` | — | `DEPTH_PRO2_FOCAL_MODEL` from **Load Depth Pro 2 Focal Model**. |
 | `image` | — | `IMAGE` batch, estimated one frame at a time. |
-| `sensor_width_mm` | `36.0` | Sensor width in mm for `focal_length_mm`; 36 mm is full-frame / 35mm equivalent. Advanced. |
+| `sensor_width_mm` | `36` | Text field: sensor width in mm for `focal_length_mm`. `auto` also means 36 (full-frame / 35mm equivalent). Advanced. |
 
 Outputs: `focal_length_px` and `focal_length_mm` (`FLOAT`), both the median over the batch.
 
@@ -220,7 +221,7 @@ Outputs: `focal_length_px` and `focal_length_mm` (`FLOAT`), both the median over
 | --- | --- | --- |
 | `model` | — | `DEPTH_PRO2_FOCAL_COREML_MODEL` from **Load Depth Pro 2 Focal Core ML**. |
 | `image` | — | `IMAGE` batch; frames are cover cropped to 896x512 and estimated one at a time. |
-| `sensor_width_mm` | `36.0` | Sensor width in mm for `focal_length_mm`; 36 mm is full-frame / 35mm equivalent. Advanced. |
+| `sensor_width_mm` | `36` | Text field: sensor width in mm for `focal_length_mm`. `auto` also means 36 (full-frame / 35mm equivalent). Advanced. |
 
 Outputs: `focal_length_px` (of the 896x512 input) and `focal_length_mm` (`FLOAT`), both the median over the batch.
 

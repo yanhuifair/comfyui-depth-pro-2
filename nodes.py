@@ -241,6 +241,16 @@ def _numpy_copy(array) -> np.ndarray:
     return np.array(np.lib.stride_tricks.as_strided(values, shape=shape, strides=strides))
 
 
+def _sensor_width_mm(value) -> float:
+    """Accept a number or text; old workflows can still carry 'auto' in this widget."""
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("", "auto"):
+            return 36.0
+        return float(text)
+    return float(value)
+
+
 def _cover(x: torch.Tensor, height: int, width: int) -> torch.Tensor:
     """Scale a (3, H, W) frame to cover (height, width), then centre crop, as Apple's demo does."""
     source_h, source_w = x.shape[-2:]
@@ -613,14 +623,11 @@ class DepthPro2Focal(io.ComfyNode):
                     "image",
                     tooltip="IMAGE batch; frames are estimated separately and the median is returned.",
                 ),
-                io.Float.Input(
+                io.String.Input(
                     "sensor_width_mm",
-                    default=36.0,
-                    min=1.0,
-                    max=100.0,
-                    step=0.5,
-                    round=0.1,
-                    tooltip="Sensor width in mm used for focal_length_mm. 36 mm is full-frame / 35mm equivalent.",
+                    default="36",
+                    placeholder="36",
+                    tooltip="Sensor width in mm for focal_length_mm. 36 is full-frame / 35mm equivalent; 'auto' is also accepted.",
                     advanced=True,
                 ),
             ],
@@ -632,13 +639,14 @@ class DepthPro2Focal(io.ComfyNode):
 
     @classmethod
     def execute(cls, model, image, sensor_width_mm) -> io.NodeOutput:
+        sensor = _sensor_width_mm(sensor_width_mm)
         transform = partial(to_normalized_tensor, device=next(model.parameters()).device)
         pixels, millimetres = [], []
         with torch.no_grad():
             for frame in image:
                 f_px = model.focal_length_px(_normalized(frame, transform)[None]).item()
                 pixels.append(f_px)
-                millimetres.append(f_px * sensor_width_mm / frame.shape[-2])  # IMAGE row is (H, W, C).
+                millimetres.append(f_px * sensor / frame.shape[-2])  # IMAGE row is (H, W, C).
         return io.NodeOutput(float(np.median(pixels)), float(np.median(millimetres)))
 
 
@@ -724,14 +732,11 @@ class DepthPro2FocalCoreML(io.ComfyNode):
                     "image",
                     tooltip="IMAGE batch; frames are estimated separately and the median is returned.",
                 ),
-                io.Float.Input(
+                io.String.Input(
                     "sensor_width_mm",
-                    default=36.0,
-                    min=1.0,
-                    max=100.0,
-                    step=0.5,
-                    round=0.1,
-                    tooltip="Sensor width in mm used for focal_length_mm. 36 mm is full-frame / 35mm equivalent.",
+                    default="36",
+                    placeholder="36",
+                    tooltip="Sensor width in mm for focal_length_mm. 36 is full-frame / 35mm equivalent; 'auto' is also accepted.",
                     advanced=True,
                 ),
             ],
@@ -744,6 +749,7 @@ class DepthPro2FocalCoreML(io.ComfyNode):
     @classmethod
     def execute(cls, model, image, sensor_width_mm) -> io.NodeOutput:
         CoreML, _ = _coreml()
+        sensor = _sensor_width_mm(sensor_width_mm)
         fov, name, data_type, dtype = model
         pixels, millimetres = [], []
         for frame in image:
@@ -761,7 +767,7 @@ class DepthPro2FocalCoreML(io.ComfyNode):
                 _numpy_copy(prediction.featureValueForName_("fov").multiArrayValue()), dtype=np.float32)
             f_px = median_focal_length_px(torch.from_numpy(angles), *APPLE_FOV_SIZE).item()
             pixels.append(f_px)
-            millimetres.append(f_px * sensor_width_mm / APPLE_FOV_SIZE[1])
+            millimetres.append(f_px * sensor / APPLE_FOV_SIZE[1])
         return io.NodeOutput(float(np.median(pixels)), float(np.median(millimetres)))
 
 
