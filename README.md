@@ -49,9 +49,13 @@ Focal estimation has its own loader nodes, just like depth:
 - **Load Depth Pro 2 Focal Core ML** → **Depth Pro 2 Focal (Core ML)** runs Apple's Core ML
   field-of-view package from the same repository as the Core ML depth packages.
 
-Both estimator nodes take an `IMAGE`, estimate each frame separately, return the batch's median as a
-`FLOAT` in pixels, and can feed a depth node's `focal_length_px` socket or your own calibration
-pipeline. The loaded model stays cached between runs, like the depth loader's weights.
+Both estimator nodes take an `IMAGE`, estimate each frame separately, and return the batch's median
+as two `FLOAT`s: `focal_length_px` and `focal_length_mm`. The pixel value feeds a depth node's
+`focal_length_px` socket; the millimetre value is a full-frame-equivalent lens focal length, computed
+as `f_px × sensor_width_mm / image_width_px` with a default 36 mm sensor (change `sensor_width_mm`
+for another camera). The Core ML FOV model estimates pixels on its fixed 896x512 input, so its
+millimetre value uses 896 px as the width; the millimetre result is independent of how the source
+frame was cropped. The loaded model stays cached between runs, like the depth loader's weights.
 
 ## Video
 
@@ -120,8 +124,8 @@ Core ML. Memory grows quickly with the size: S needs about 1.5 GB at 854x480 and
 L about 4 GB and 18 GB. On a 16 GB Mac, stay with S or B at the default size.
 
 **Load Depth Pro 2 Focal Core ML** loads the field-of-view package from the same repository into a
-`DEPTH_PRO2_FOCAL_COREML_MODEL` socket; **Depth Pro 2 Focal (Core ML)** then cover-crops each frame to 896x512,
-estimates a pixel focal length and returns the median over the batch.
+`DEPTH_PRO2_FOCAL_COREML_MODEL` socket; **Depth Pro 2 Focal (Core ML)** then cover-crops each frame to 896x512
+and returns the batch's median focal length in both pixels (of that input) and full-frame-equivalent mm.
 
 **Load Depth Pro 2 Core ML** lists the `.mlpackage` folders already in `models/depth_pro2/`,
 including Apple's downloaded packages and your own exports. To export your own at another size,
@@ -206,8 +210,9 @@ Output: `DEPTH_PRO2_FOCAL_COREML_MODEL`, for **Depth Pro 2 Focal (Core ML)**.
 | --- | --- | --- |
 | `model` | — | `DEPTH_PRO2_FOCAL_MODEL` from **Load Depth Pro 2 Focal Model**. |
 | `image` | — | `IMAGE` batch, estimated one frame at a time. |
+| `sensor_width_mm` | `36.0` | Sensor width in mm for `focal_length_mm`; 36 mm is full-frame / 35mm equivalent. Advanced. |
 
-Output: `focal_length_px` (`FLOAT`), the median over the batch.
+Outputs: `focal_length_px` and `focal_length_mm` (`FLOAT`), both the median over the batch.
 
 ### Depth Pro 2 Focal (Core ML)
 
@@ -215,8 +220,9 @@ Output: `focal_length_px` (`FLOAT`), the median over the batch.
 | --- | --- | --- |
 | `model` | — | `DEPTH_PRO2_FOCAL_COREML_MODEL` from **Load Depth Pro 2 Focal Core ML**. |
 | `image` | — | `IMAGE` batch; frames are cover cropped to 896x512 and estimated one at a time. |
+| `sensor_width_mm` | `36.0` | Sensor width in mm for `focal_length_mm`; 36 mm is full-frame / 35mm equivalent. Advanced. |
 
-Output: `focal_length_px` (`FLOAT`), the median over the batch.
+Outputs: `focal_length_px` (of the 896x512 input) and `focal_length_mm` (`FLOAT`), both the median over the batch.
 
 ### Depth Pro 2 Video
 

@@ -603,8 +603,9 @@ class DepthPro2Focal(io.ComfyNode):
             display_name="Depth Pro 2 Focal",
             category="depth",
             description=(
-                "Estimate focal length in pixels from an image with a loaded DepthPro2-focal "
-                "model. Frames of a batch are estimated separately and the median is returned."
+                "Estimate focal length from an image with a loaded DepthPro2-focal model. Returns "
+                "pixels and full-frame-equivalent millimetres; frames of a batch are estimated "
+                "separately and the median is returned."
             ),
             inputs=[
                 DepthPro2FocalModel.Input("model"),
@@ -612,18 +613,33 @@ class DepthPro2Focal(io.ComfyNode):
                     "image",
                     tooltip="IMAGE batch; frames are estimated separately and the median is returned.",
                 ),
+                io.Float.Input(
+                    "sensor_width_mm",
+                    default=36.0,
+                    min=1.0,
+                    max=100.0,
+                    step=0.5,
+                    round=0.1,
+                    tooltip="Sensor width in mm used for focal_length_mm. 36 mm is full-frame / 35mm equivalent.",
+                    advanced=True,
+                ),
             ],
-            outputs=[io.Float.Output("focal_length_px")],
+            outputs=[
+                io.Float.Output("focal_length_px"),
+                io.Float.Output("focal_length_mm"),
+            ],
         )
 
     @classmethod
-    def execute(cls, model, image) -> io.NodeOutput:
+    def execute(cls, model, image, sensor_width_mm) -> io.NodeOutput:
         transform = partial(to_normalized_tensor, device=next(model.parameters()).device)
-        values = []
+        pixels, millimetres = [], []
         with torch.no_grad():
             for frame in image:
-                values.append(model.focal_length_px(_normalized(frame, transform)[None]).item())
-        return io.NodeOutput(float(np.median(values)))
+                f_px = model.focal_length_px(_normalized(frame, transform)[None]).item()
+                pixels.append(f_px)
+                millimetres.append(f_px * sensor_width_mm / frame.shape[-2])  # IMAGE row is (H, W, C).
+        return io.NodeOutput(float(np.median(pixels)), float(np.median(millimetres)))
 
 
 @lru_cache(maxsize=4)
@@ -698,9 +714,9 @@ class DepthPro2FocalCoreML(io.ComfyNode):
             display_name="Depth Pro 2 Focal (Core ML)",
             category="depth",
             description=(
-                "Estimate focal length in pixels with a loaded Core ML field-of-view model. "
-                "Frames are cover cropped to its fixed 896x512 input; the batch's median is "
-                "returned."
+                "Estimate focal length with a loaded Core ML field-of-view model. Returns pixels "
+                "for its fixed 896x512 input and full-frame-equivalent millimetres. Frames are "
+                "cover cropped to that input; the batch's median is returned."
             ),
             inputs=[
                 DepthPro2FocalCoreMLModel.Input("model"),
@@ -708,19 +724,32 @@ class DepthPro2FocalCoreML(io.ComfyNode):
                     "image",
                     tooltip="IMAGE batch; frames are estimated separately and the median is returned.",
                 ),
+                io.Float.Input(
+                    "sensor_width_mm",
+                    default=36.0,
+                    min=1.0,
+                    max=100.0,
+                    step=0.5,
+                    round=0.1,
+                    tooltip="Sensor width in mm used for focal_length_mm. 36 mm is full-frame / 35mm equivalent.",
+                    advanced=True,
+                ),
             ],
-            outputs=[io.Float.Output("focal_length_px")],
+            outputs=[
+                io.Float.Output("focal_length_px"),
+                io.Float.Output("focal_length_mm"),
+            ],
         )
 
     @classmethod
-    def execute(cls, model, image) -> io.NodeOutput:
+    def execute(cls, model, image, sensor_width_mm) -> io.NodeOutput:
         CoreML, _ = _coreml()
         fov, name, data_type, dtype = model
-        values = []
+        pixels, millimetres = [], []
         for frame in image:
             x = _cover(_normalized(frame, _coreml_transform), *APPLE_FOV_SIZE)
-            pixels = np.ascontiguousarray(x.detach().cpu().numpy()[None], dtype=dtype)
-            array = _ml_array(pixels, data_type)
+            frame_pixels = np.ascontiguousarray(x.detach().cpu().numpy()[None], dtype=dtype)
+            array = _ml_array(frame_pixels, data_type)
             features, error = _objc(CoreML.MLDictionaryFeatureProvider.alloc().initWithDictionary_error_(
                 {name: CoreML.MLFeatureValue.featureValueWithMultiArray_(array)}, None))
             if features is None:
@@ -730,8 +759,10 @@ class DepthPro2FocalCoreML(io.ComfyNode):
                 raise ValueError(f"Core ML inference failed: {error}")
             angles = np.ascontiguousarray(
                 _numpy_copy(prediction.featureValueForName_("fov").multiArrayValue()), dtype=np.float32)
-            values.append(median_focal_length_px(torch.from_numpy(angles), *APPLE_FOV_SIZE).item())
-        return io.NodeOutput(float(np.median(values)))
+            f_px = median_focal_length_px(torch.from_numpy(angles), *APPLE_FOV_SIZE).item()
+            pixels.append(f_px)
+            millimetres.append(f_px * sensor_width_mm / APPLE_FOV_SIZE[1])
+        return io.NodeOutput(float(np.median(pixels)), float(np.median(millimetres)))
 
 
 class DepthPro2Video(io.ComfyNode):
