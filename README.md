@@ -11,7 +11,8 @@ Project page, with the paper, the comparison videos and the benchmarks:
 [apple-aiml-research.github.io/ml-depth-pro-2](https://apple-aiml-research.github.io/ml-depth-pro-2/).
 Upstream: [paper](https://arxiv.org/abs/2611.26603) ·
 [code](https://github.com/apple-aiml-research/ml-depth-pro-2) ·
-[weights](https://huggingface.co/apple/DepthPro2).
+[weights](https://huggingface.co/apple/DepthPro2) ·
+[Core ML weights](https://huggingface.co/apple/DepthPro2-coreml).
 
 ![The workflow in ComfyUI: Load Image and Load Depth Pro 2 Model wired into Depth Pro 2, previewing a grayscale depth map of a 1440×1080 photo](examples/example.png)
 
@@ -90,11 +91,35 @@ are used for both lookup and download.
 
 ## Core ML (Apple silicon)
 
-**Load Depth Pro 2 Core ML** runs a Core ML package on Apple's system runtime instead of PyTorch.
-Its output is the same `DEPTH_PRO2_MODEL` socket, so it plugs into the same **Depth Pro 2** node.
-Needs macOS 15 or later on Apple silicon; the Python bridge comes from `requirements.txt`.
+Two loaders feed the same `DEPTH_PRO2_MODEL` socket, so every downstream node stays the same.
+Apple silicon and macOS 15 or later are required; the Python bridge is in `requirements.txt`.
+Apple's published packages are verified here on macOS 27 through the public Core ML API.
 
-A Core ML package bakes in one input size, so you build one from the checkpoint you already have.
+**Load Apple Depth Pro 2 Core ML** downloads one of Apple's
+[published packages](https://huggingface.co/apple/DepthPro2-coreml/) into `models/depth_pro2/` on
+first use and loads a `res_<W>x<H>` function from it.
+
+| Package | Size | Notes |
+| --- | --- | --- |
+| `depthpro2-s_w4.mlpackage` | 51 MB | fastest |
+| `depthpro2-b_w4.mlpackage` | 188 MB | |
+| `depthpro2-l_w4.mlpackage` | 891 MB | |
+| `depthpro2-h_w4.mlpackage` | 1.6 GB | sharpest |
+| `depthpro2-fov_512x896.mlpackage` | 91 MB | focal length, used by the Core ML focal node |
+
+The depth packages expose `res_854x480` (default), `res_640x360`, `res_896x512`, `res_1138x640`
+and `res_1280x720`. Pick one with `resolution`; the depth map comes out at that size. Their `w4`
+state holds four frames: the photo node starts a fresh state for every image, while **Depth Pro 2
+Video** carries one state through the whole clip. `window`, `overlap` and `mode` do not apply to
+Core ML. Memory grows quickly with the size: S needs about 1.5 GB at 854x480 and 5 GB at 1280x720;
+L about 4 GB and 18 GB. On a 16 GB Mac, stay with S or B at the default size.
+
+**Depth Pro 2 Focal (Core ML)** uses the field-of-view package from the same repository. It
+cover-crops each frame to 896x512, estimates a pixel focal length and returns the median over the
+batch; wire it into `focal_length_px` like the PyTorch focal node.
+
+**Load Depth Pro 2 Core ML** lists the `.mlpackage` folders already in `models/depth_pro2/`,
+including Apple's downloaded packages and your own exports. To export your own at another size,
 coremltools has no wheels past Python 3.13, so run the exporter with an older interpreter — `uv`
 fetches one on the spot, and ComfyUI keeps running on its own Python:
 
@@ -107,14 +132,11 @@ uv run --python 3.13 --with coremltools --with timm --with av \
 
 Refresh the node list (`r` on the canvas) and the package shows up in the loader. Repeat with
 another `--size` for another resolution; the export takes a couple of minutes and the package about
-half the size of the `.pt`.
+half the size of the `.pt`. An exported package holds one size and no temporal state; `max_side` is
+ignored for all Core ML packages.
 
-A package runs at its own size and nothing else: frames are scaled to cover it and center cropped,
-and the depth map comes out at that size rather than the input size. There is no field-of-view head
-and no temporal state, and `max_side` is ignored.
-
-This is a way to run Depth Pro 2 outside PyTorch, not a speed-up. Measured with `depthpro2-s` at
-854×480, one frame at a time, on Apple silicon:
+This is a way to run Depth Pro 2 outside PyTorch, not a speed-up. Measured with an exported
+`depthpro2-s` package at 854×480, one frame at a time, on Apple silicon:
 
 | Backend | ms per frame |
 | --- | --- |
@@ -122,12 +144,6 @@ This is a way to run Depth Pro 2 outside PyTorch, not a speed-up. Measured with 
 | Core ML, GPU | 24 |
 | Core ML, CPU + neural engine | 48 |
 | Core ML, CPU only | 495 |
-
-Apple's own packages ([`apple/DepthPro2-coreml`](https://huggingface.co/apple/DepthPro2-coreml/))
-cannot be loaded through the public Core ML API on macOS today: `MLModel` rejects them with
-`This MLModel doesn't support the multi-function description syntax` without a `functionName` and
-with `.functionName must be nil unless the model type is ML Program` when you give one. Same from
-Swift, so exporting your own with the command above is the only way in for now.
 
 ## Inputs
 
@@ -143,6 +159,14 @@ Swift, so exporting your own with the command above is the only way in for now.
 | --- | --- | --- |
 | `package` | first found | A `.mlpackage` folder in `models/depth_pro2`, which sets the output size. Refresh the node list after adding one. |
 | `compute_units` | `gpu` | Where Core ML runs the package: `gpu`, `neural_engine`, `cpu` or `all`. The neural engine is usually slower here. Advanced. |
+
+### Load Apple Depth Pro 2 Core ML
+
+| Input | Default | Description |
+| --- | --- | --- |
+| `model` | `depthpro2-s_w4.mlpackage` | Apple's published package, downloaded on first use. |
+| `resolution` | `default` | `res_<W>x<H>` function to run: `default` (854x480), `640x360`, `896x512`, `1138x640` or `1280x720`. The output has that size. |
+| `compute_units` | `gpu` | Where Core ML runs the package: `gpu`, `neural_engine`, `cpu` or `all`. Advanced. |
 
 ### Depth Pro 2
 
@@ -163,6 +187,15 @@ Swift, so exporting your own with the command above is the only way in for now.
 
 Output: `focal_length_px` (`FLOAT`), the median over the batch.
 
+### Depth Pro 2 Focal (Core ML)
+
+| Input | Default | Description |
+| --- | --- | --- |
+| `image` | — | `IMAGE` batch; frames are cover cropped to 896x512 and estimated one at a time. |
+| `compute_units` | `gpu` | Where Core ML runs the field-of-view package: `gpu`, `neural_engine`, `cpu` or `all`. Advanced. |
+
+Output: `focal_length_px` (`FLOAT`), the median over the batch.
+
 ### Depth Pro 2 Video
 
 | Input | Default | Description |
@@ -171,8 +204,8 @@ Output: `focal_length_px` (`FLOAT`), the median over the batch.
 | `video` | — | `VIDEO`, typically from **Load Video**. |
 | `focal_length_px` | `0` | Focal length in pixels for the whole clip; `0` takes the median of the estimates over the first window. |
 | `window` | `16` | Frames attended together. Larger is steadier and costs more memory; `1` is frame by frame. |
-| `overlap` | `4` | Frames two neighbouring clips share, cross-faded at the seam. Must stay below `window`; ignored by `unbuffered`. Advanced. |
-| `mode` | `buffered` | `buffered` predicts overlapping clips, so a frame also sees later frames; `unbuffered` predicts each frame as it arrives, from itself and the earlier ones. Advanced. |
+| `overlap` | `4` | Frames two neighbouring clips share, cross-faded at the seam. Must stay below `window`; ignored by `unbuffered` and by Core ML. Advanced. |
+| `mode` | `buffered` | `buffered` predicts overlapping clips, so a frame also sees later frames; `unbuffered` predicts each frame as it arrives, from itself and the earlier ones. Core ML uses its own four-frame state instead. Advanced. |
 | `max_side` | `1024` | Downscale the longest side to this many pixels before inference; `0` keeps full resolution. A Core ML package ignores it. Advanced. |
 | `output` | `grayscale` | `grayscale`: inverse depth, white near. `color`: depth ramp, red near, blue far. |
 
@@ -188,8 +221,9 @@ Outputs: `video` (`VIDEO`, with the source frame rate and audio), `images` (`IMA
   batch of video frames has no consistency between them — even when it comes from
   **Get Video Components**. **Depth Pro 2 Video** is the temporal path, attending a clip together
   the way the video results on the project page do.
-- A Core ML package keeps no state between frames, so the video node runs it frame by frame: no clip
-  attention, and the whole clip gets the map size the package was exported for.
+- Apple's `w4` Core ML packages keep four frames of state. The photo node resets it per image; the
+  video node keeps one state for the whole clip, so neighbouring frames still inform each other.
+  Exported packages have no state and always run frame by frame.
 - The field-of-view head is loaded for every preset, even when `focal_length_px` is supplied.
 - **Depth Pro 2 Focal** uses Apple's newer standalone focal weights, not the `.pt` FOV head shared by
   the depth presets; both estimate pixels for the frame they are given.
@@ -201,7 +235,7 @@ Outputs: `video` (`VIDEO`, with the source frame rate and audio), `images` (`IMA
 | Symptom | Cause |
 | --- | --- |
 | `SSLCertVerificationError` while downloading | The loader downloads through `certifi`, because python.org macOS builds ship an empty CA bundle. If it still fails, run `Install Certificates.command` in that Python's folder. |
-| Focal download fails with a proxy 502 | The focal node downloads from Hugging Face. Set `HTTP_PROXY`/`HTTPS_PROXY` to a working proxy before starting ComfyUI, or put the Hugging Face `model.safetensors` in `models/depth_pro2/depthpro2-focal.safetensors` yourself. |
+| Hugging Face download fails with a proxy 502 | The focal and Apple Core ML nodes download from Hugging Face. Set `HTTP_PROXY`/`HTTPS_PROXY` to a working proxy before starting ComfyUI, or place the files under `models/depth_pro2/` yourself. |
 | Depth scale or geometry looks wrong | `focal_length_px` is a guess when left at `0`; pass the real focal length in pixels. |
 
 ## Files

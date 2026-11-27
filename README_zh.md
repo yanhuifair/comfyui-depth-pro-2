@@ -10,7 +10,8 @@
 [apple-aiml-research.github.io/ml-depth-pro-2](https://apple-aiml-research.github.io/ml-depth-pro-2/)。
 上游链接：[论文](https://arxiv.org/abs/2611.26603) ·
 [代码](https://github.com/apple-aiml-research/ml-depth-pro-2) ·
-[权重](https://huggingface.co/apple/DepthPro2)。
+[权重](https://huggingface.co/apple/DepthPro2) ·
+[Core ML 权重](https://huggingface.co/apple/DepthPro2-coreml)。
 
 ![ComfyUI 里的完整连线：Load Image 和 Load Depth Pro 2 Model 接入 Depth Pro 2，Preview Image 显示 1440×1080 照片的灰度深度图](examples/example.png)
 
@@ -80,12 +81,33 @@ overlap 3 每趟只前进 1 帧，每帧要算 4 遍——同一段素材上前�
 
 ## Core ML（Apple 芯片）
 
-**Load Depth Pro 2 Core ML** 让模型跑在 Apple 系统的 Core ML 运行时上，而不是 PyTorch。它的输出口仍是
-`DEPTH_PRO2_MODEL`，可以直接连进同一个 **Depth Pro 2** 节点。要求 Apple 芯片 + macOS 15 及以上，
-Python 侧的桥接层已写进 `requirements.txt`。
+两个加载器都输出同样的 `DEPTH_PRO2_MODEL`，后面的节点不用改。要求 Apple 芯片 + macOS 15 及以上，
+Python 侧的桥接层已写进 `requirements.txt`；Apple 官方包已在本机 macOS 27 上用公开 Core ML API 验证。
 
-Core ML 包把输入尺寸写死在包里，所以要用你手上已有的 `.pt` 自己导一个。coremltools 在 Python 3.13
-之后没有 wheel，所以导出得用旧解释器——`uv` 可以现拉一个，ComfyUI 自己该用哪个 Python 还用哪个：
+**Load Apple Depth Pro 2 Core ML** 首次使用时从
+[`apple/DepthPro2-coreml`](https://huggingface.co/apple/DepthPro2-coreml/) 下载官方包到
+`models/depth_pro2/`，再加载包里的某个 `res_<W>x<H>` 函数。
+
+| 包 | 体积 | 说明 |
+| --- | --- | --- |
+| `depthpro2-s_w4.mlpackage` | 51 MB | 最快 |
+| `depthpro2-b_w4.mlpackage` | 188 MB | |
+| `depthpro2-l_w4.mlpackage` | 891 MB | |
+| `depthpro2-h_w4.mlpackage` | 1.6 GB | 最锐利 |
+| `depthpro2-fov_512x896.mlpackage` | 91 MB | 焦距，给 Core ML 焦距节点用 |
+
+深度包提供 `res_854x480`（默认）、`res_640x360`、`res_896x512`、`res_1138x640`、`res_1280x720`
+五个函数；用 `resolution` 选择，深度图就按对应尺寸输出。`w4` 包在 Core ML state 里保留四帧：拍照节点
+每张图重置一次状态，**Depth Pro 2 Video** 则整段共用一份状态。`window`、`overlap`、`mode` 对 Core ML
+无效。显存随尺寸涨得很快：S 在 854x480 约 1.5 GB、1280x720 约 5 GB；L 分别约 4 GB 和 18 GB。
+16 GB 的 Mac 建议用 S 或 B，并保持默认尺寸。
+
+**Depth Pro 2 Focal (Core ML)** 用同一个仓库里的视场角包：把每帧放大裁剪到 896x512，估出以像素为单位
+的焦距，返回批次中位数；可以像 PyTorch 焦距节点一样接到 `focal_length_px`。
+
+**Load Depth Pro 2 Core ML** 列出 `models/depth_pro2/` 里已有的 `.mlpackage`，包括下载好的官方包和自己
+导出的包。想导出别的尺寸，coremltools 在 Python 3.13 之后没有 wheel，所以导出得用旧解释器——`uv`
+可以现拉一个，ComfyUI 自己该用哪个 Python 还用哪个：
 
 ```bash
 cd ComfyUI/custom_nodes/comfyui-depth-pro-2
@@ -95,13 +117,10 @@ uv run --python 3.13 --with coremltools --with timm --with av \
 ```
 
 导出约两分钟，包体积约为 `.pt` 的一半。放进目录后按 `r` 刷新节点列表，加载器里就能选到它。想要别的
-分辨率就再换一个 `--size` 导一次。
+分辨率就再换一个 `--size` 导一次。自己导的包只有一个尺寸、无时序状态；所有 Core ML 包都忽略 `max_side`。
 
-包只按自己的尺寸跑：输入会被放大到覆盖该尺寸再居中裁剪，深度图输出的也是这个尺寸，而不是输入尺寸。
-Core ML 包里没有视场角头，也没有时序状态，`max_side` 对它无效。
-
-它是「在 PyTorch 之外跑 Depth Pro 2」的一条路，不是加速方案。同一台 Apple 芯片机器上，用
-`depthpro2-s` 跑 854×480、逐帧推理的实测：
+它是「在 PyTorch 之外跑 Depth Pro 2」的一条路，不是加速方案。同一台 Apple 芯片机器上，用自己导出的
+`depthpro2-s` 包跑 854×480、逐帧推理的实测：
 
 | 后端 | 每帧耗时 |
 | --- | --- |
@@ -109,12 +128,6 @@ Core ML 包里没有视场角头，也没有时序状态，`max_side` 对它无�
 | Core ML，GPU | 24 ms |
 | Core ML，CPU + 神经引擎 | 48 ms |
 | Core ML，仅 CPU | 495 ms |
-
-Apple 自己发布的 Core ML 包（[`apple/DepthPro2-coreml`](https://huggingface.co/apple/DepthPro2-coreml/)）
-目前在 macOS 上用公开 API 加载不了：不给 `functionName` 报
-`This MLModel doesn't support the multi-function description syntax`，给了又报
-`.functionName must be nil unless the model type is ML Program`。Swift 里也一样，所以眼下只能用上面
-那条命令自己导。
 
 ## 输入项
 
@@ -131,6 +144,14 @@ Apple 自己发布的 Core ML 包（[`apple/DepthPro2-coreml`](https://huggingfa
 | --- | --- | --- |
 | `package` | 目录里第一个 | `models/depth_pro2/` 下的 `.mlpackage` 目录，它同时决定输出尺寸；新增后需刷新节点列表。 |
 | `compute_units` | `gpu` | Core ML 的运行设备：`gpu`、`neural_engine`、`cpu` 或 `all`；神经引擎在这里通常更慢。高级选项。 |
+
+### Load Apple Depth Pro 2 Core ML
+
+| 输入 | 默认 | 说明 |
+| --- | --- | --- |
+| `model` | `depthpro2-s_w4.mlpackage` | Apple 官方包，首次使用时下载。 |
+| `resolution` | `default` | 要运行的 `res_<W>x<H>` 函数：`default`（854x480）、`640x360`、`896x512`、`1138x640`、`1280x720`；输出即该尺寸。 |
+| `compute_units` | `gpu` | Core ML 的运行设备：`gpu`、`neural_engine`、`cpu` 或 `all`。高级选项。 |
 
 ### Depth Pro 2
 
@@ -151,6 +172,15 @@ Apple 自己发布的 Core ML 包（[`apple/DepthPro2-coreml`](https://huggingfa
 
 输出：`focal_length_px`（`FLOAT`），批次的中位数。
 
+### Depth Pro 2 Focal (Core ML)
+
+| 输入 | 默认 | 说明 |
+| --- | --- | --- |
+| `image` | — | `IMAGE` 批次；每帧放大裁剪到 896x512 后逐帧推理。 |
+| `compute_units` | `gpu` | Core ML 的运行设备：`gpu`、`neural_engine`、`cpu` 或 `all`。高级选项。 |
+
+输出：`focal_length_px`（`FLOAT`），批次的中位数。
+
 ### Depth Pro 2 Video
 
 | 输入 | 默认 | 说明 |
@@ -159,8 +189,8 @@ Apple 自己发布的 Core ML 包（[`apple/DepthPro2-coreml`](https://huggingfa
 | `video` | — | `VIDEO`，一般来自 **Load Video**。 |
 | `focal_length_px` | `0` | 整段视频共用的焦距（像素）；`0` 取第一个窗口估算值的中位数。 |
 | `window` | `16` | 联合推理的帧数。越大越稳、越吃显存；`1` 就是逐帧独立。 |
-| `overlap` | `4` | 相邻两个片段共享的帧数，接缝处做交叉淡入淡出；必须小于 `window`，`unbuffered` 忽略它。高级选项。 |
-| `mode` | `buffered` | `buffered` 推重叠片段，因此每帧还能看到其后的帧；`unbuffered` 靠 KV cache，每帧只用自己的和之前的帧。高级选项。 |
+| `overlap` | `4` | 相邻两个片段共享的帧数，接缝处做交叉淡入淡出；必须小于 `window`，`unbuffered` 和 Core ML 忽略它。高级选项。 |
+| `mode` | `buffered` | `buffered` 推重叠片段，因此每帧还能看到其后的帧；`unbuffered` 靠 KV cache，每帧只用自己的和之前的帧。Core ML 用自己的四帧状态，不用这两个选项。高级选项。 |
 | `max_side` | `1024` | 推理前把最长边缩到该像素数，`0` 表示保持原分辨率；Core ML 包忽略它。高级选项。 |
 | `output` | `grayscale` | `grayscale`：逆深度，白色为近；`color`：深度色带，红近蓝远。 |
 
@@ -172,7 +202,8 @@ Apple 自己发布的 Core ML 包（[`apple/DepthPro2-coreml`](https://huggingfa
 - 输出分辨率等于推理分辨率，即原图尺寸，或按 `max_side` 缩小后的尺寸；Core ML 包输出的是它导出时的尺寸。
 - 拍照节点对批次里的每一帧都独立推理、各自估焦距，所以视频的帧序列从这里过是没有时序一致性的，
   哪怕它来自 **Get Video Components**；时序通路是 **Depth Pro 2 Video**，做法和项目主页上的视频结果一致。
-- Core ML 包在帧之间不保存状态，视频节点只能逐帧跑它：没有片段联合注意力，而且整段都按包导出时的尺寸输出。
+- Apple 的 `w4` Core ML 包会在 state 里保留四帧：拍照节点每张图重置一次，视频节点整段共用一份状态，
+  相邻帧仍能互相注意到。自己导出的包没有状态，只能逐帧跑。
 - 即使填了 `focal_length_px`，视场角头也会一并加载。
 - **Depth Pro 2 Focal** 用的是 Apple 新发布的独立焦距权重，不是各深度预设共用的 `.pt` 视场角头；两者输出的都是输入帧的像素焦距。
 - 显存不足：先调小 `window`（它是乘数），再调小 `max_side`；填入的焦距会按同样比例缩放。
@@ -182,7 +213,7 @@ Apple 自己发布的 Core ML 包（[`apple/DepthPro2-coreml`](https://huggingfa
 | 现象 | 原因 |
 | --- | --- |
 | 下载时报 `SSLCertVerificationError` | 加载器改用 `certifi` 的 CA 证书下载，因为 python.org 的 macOS 安装包自带空证书。若仍失败，在该 Python 目录下运行 `Install Certificates.command`。 |
-| 焦距权重下载报代理 502 | 焦距节点从 Hugging Face 下载。启动 ComfyUI 前把 `HTTP_PROXY`/`HTTPS_PROXY` 指向可用的代理，或自行把 HF 上的 `model.safetensors` 放到 `models/depth_pro2/depthpro2-focal.safetensors`。 |
+| Hugging Face 下载报代理 502 | 焦距节点和 Apple Core ML 节点都从 Hugging Face 下载。启动 ComfyUI 前把 `HTTP_PROXY`/`HTTPS_PROXY` 指向可用的代理，或自行把文件放进 `models/depth_pro2/`。 |
 | 深度尺度或结构不对 | `focal_length_px` 为 `0` 时只是估算值，请填入真实焦距（像素）。 |
 
 ## 目录结构
