@@ -24,10 +24,10 @@ pip install -r comfyui-depth-pro-2/requirements.txt
 ```
 
 Run the `pip` line in the Python environment that runs ComfyUI.
-`timm`, `huggingface-hub` and `certifi` are the only additions, plus `pyobjc-framework-CoreML` on
-macOS for the optional [Core ML backend](#core-ml-apple-silicon); `torch`, `numpy`, `Pillow` and `av`
-already come with ComfyUI. `timm` is held below 1.1 because the vendored model code uses the
-timm 1.0 vision-transformer API. Restart ComfyUI: **Load Depth Pro 2 Model** shows up under
+`timm`, `huggingface-hub`, `safetensors` and `certifi` are the only additions, plus
+`pyobjc-framework-CoreML` on macOS for the optional [Core ML backend](#core-ml-apple-silicon);
+`torch`, `numpy`, `Pillow` and `av` already come with ComfyUI. `timm` is held below 1.1 because the
+vendored model code uses the timm 1.0 vision-transformer API. Restart ComfyUI: **Load Depth Pro 2 Model** shows up under
 `model/loaders` and **Depth Pro 2** under `depth`. Any ComfyUI release with V3 node support
 (`comfy_entrypoint`) works; tested on 0.45.4.
 
@@ -37,6 +37,15 @@ Connect **Load Depth Pro 2 Model** to the `model` socket of **Depth Pro 2**, fee
 `image`, and take the depth map to any image consumer (Save Image, ControlNet, masks, ...). One
 loader can serve several depth nodes, and the weights stay loaded until ComfyUI drops them from the
 node cache.
+
+## Focal length
+
+**Depth Pro 2 Focal** runs Apple's standalone
+[DepthPro2-focal](https://huggingface.co/apple/DepthPro2-focal) estimator on an `IMAGE` and returns
+one `FLOAT` in pixels. Wire it into the `focal_length_px` socket of a depth node instead of guessing,
+or use the number for your own calibration. The 89 MB checkpoint downloads on first use into
+`models/depth_pro2/`. Frames of a batch are estimated one at a time; the returned value is their
+median. The estimator model is cached between runs, like the depth loader's weights.
 
 ## Video
 
@@ -73,6 +82,7 @@ frame per pass and computes each frame four times — 6 s against 23 s on that c
 | `depthpro2-l` | `depthpro2-l-tegstu7fim.pt` | 1.3 GB | |
 | `depthpro2-h` | `depthpro2-h-eivtm5w7m5.pt` | 3.5 GB | default, sharpest |
 | FOV head | `depthpro2-fov-ew55zg4kq7.pt` | 94 MB | shared by every preset |
+| Focal head | `depthpro2-focal.safetensors` | 89 MB | standalone, used by Depth Pro 2 Focal |
 
 Checkpoints are downloaded on first use of the loader node, into `models/depth_pro2/`. That folder
 is registered as `depth_pro2` in `folder_paths`, so extra search paths from `extra_model_paths.yaml`
@@ -144,6 +154,15 @@ Swift, so exporting your own with the command above is the only way in for now.
 | `max_side` | `0` | Downscale the longest side to this many pixels before inference; `0` keeps full resolution. A Core ML package ignores it and runs at its own size. Advanced. |
 | `output` | `grayscale` | `grayscale`: inverse depth, white near. `color`: depth ramp, red near, blue far. |
 
+### Depth Pro 2 Focal
+
+| Input | Default | Description |
+| --- | --- | --- |
+| `image` | — | `IMAGE` batch, estimated one frame at a time. |
+| `precision` | `auto` | Autocast dtype: `auto` is bfloat16 on GPU and float32 on CPU. Advanced. |
+
+Output: `focal_length_px` (`FLOAT`), the median over the batch.
+
 ### Depth Pro 2 Video
 
 | Input | Default | Description |
@@ -172,6 +191,8 @@ Outputs: `video` (`VIDEO`, with the source frame rate and audio), `images` (`IMA
 - A Core ML package keeps no state between frames, so the video node runs it frame by frame: no clip
   attention, and the whole clip gets the map size the package was exported for.
 - The field-of-view head is loaded for every preset, even when `focal_length_px` is supplied.
+- **Depth Pro 2 Focal** uses Apple's newer standalone focal weights, not the `.pt` FOV head shared by
+  the depth presets; both estimate pixels for the frame they are given.
 - Out of memory: lower `max_side`; on the video node lower `window` first, it is the multiplier. A
   supplied focal length is scaled by the same factor.
 
@@ -180,12 +201,13 @@ Outputs: `video` (`VIDEO`, with the source frame rate and audio), `images` (`IMA
 | Symptom | Cause |
 | --- | --- |
 | `SSLCertVerificationError` while downloading | The loader downloads through `certifi`, because python.org macOS builds ship an empty CA bundle. If it still fails, run `Install Certificates.command` in that Python's folder. |
+| Focal download fails with a proxy 502 | The focal node downloads from Hugging Face. Set `HTTP_PROXY`/`HTTPS_PROXY` to a working proxy before starting ComfyUI, or put the Hugging Face `model.safetensors` in `models/depth_pro2/depthpro2-focal.safetensors` yourself. |
 | Depth scale or geometry looks wrong | `focal_length_px` is a guess when left at `0`; pass the real focal length in pixels. |
 
 ## Files
 
 ```
-nodes.py             loader nodes, depth node, checkpoint lookup and download
+nodes.py             loader nodes, depth and focal nodes, checkpoint lookup and download
 tools/               export_coreml.py, torch checkpoint to .mlpackage
 vendor/depth_pro_2/  Apple's inference code, see vendor/LICENSE
 examples/            screenshot above

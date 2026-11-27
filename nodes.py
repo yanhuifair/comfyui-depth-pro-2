@@ -3,12 +3,14 @@ import ssl
 import sys
 import urllib.request
 from dataclasses import replace
+from functools import lru_cache, partial
 from math import ceil
 from typing import Callable, NamedTuple
 
 import certifi
 import numpy as np
 import torch
+from safetensors.torch import load_file
 from torch.nn import functional as F
 from typing_extensions import override
 
@@ -21,6 +23,8 @@ if _VENDOR not in sys.path:
     sys.path.insert(0, _VENDOR)
 
 from depth_pro_2 import PRESETS, DepthPro2, create_model_and_transforms
+from depth_pro_2.model import to_normalized_tensor
+from depth_pro_2.network.fov import FOVEstimator
 
 CHECKPOINT_FOLDER = "depth_pro2"
 CHECKPOINT_DIR = os.path.join(folder_paths.models_dir, CHECKPOINT_FOLDER)
@@ -82,8 +86,8 @@ def _download(uri: str, path: str):
     os.replace(path + ".part", path)
 
 
-def _checkpoint(uri: str) -> str:
-    name = uri.rsplit("/", 1)[-1]
+def _checkpoint(uri: str, name: str | None = None) -> str:
+    name = name or uri.rsplit("/", 1)[-1]
     directories = folder_paths.get_folder_paths(CHECKPOINT_FOLDER)
     for directory in directories:
         path = os.path.join(directory, name)
@@ -106,6 +110,21 @@ def _load(name: str, precision: str) -> DepthPro2Bundle:
         config, device=mm.get_torch_device(), precision=PRECISIONS[precision]
     )
     return DepthPro2Bundle(model, transform)
+
+
+FOCAL_CHECKPOINT_URI = "https://huggingface.co/apple/DepthPro2-focal/resolve/main/model.safetensors"
+FOCAL_CHECKPOINT_NAME = "depthpro2-focal.safetensors"
+
+
+@lru_cache(maxsize=4)
+def _focal(device: str, precision: str) -> FOVEstimator:
+    """The standalone focal estimator, kept per device and precision."""
+    target = torch.device(device)
+    dtype = PRECISIONS[precision] or (torch.float32 if target.type == "cpu" else torch.bfloat16)
+    with torch.device(target):
+        fov = FOVEstimator(dtype)
+    fov.load_state_dict(load_file(_checkpoint(FOCAL_CHECKPOINT_URI, FOCAL_CHECKPOINT_NAME)))
+    return fov.to(target).eval()
 
 
 COREML_SUFFIX = ".mlpackage"
@@ -445,6 +464,47 @@ class DepthPro2Depth(io.ComfyNode):
         return io.NodeOutput(torch.stack(maps).to(mm.intermediate_device()))
 
 
+class DepthPro2Focal(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="DepthPro2Focal",
+            display_name="Depth Pro 2 Focal",
+            category="depth",
+            description=(
+                "Estimate focal length in pixels from an image with Apple's standalone "
+                "DepthPro2-focal network. The checkpoint is downloaded into "
+                "models/depth_pro2 on first use; connect the output to a depth node's "
+                "focal_length_px input."
+            ),
+            inputs=[
+                io.Image.Input(
+                    "image",
+                    tooltip="IMAGE batch; frames are estimated separately and the median is returned.",
+                ),
+                io.Combo.Input(
+                    "precision",
+                    options=list(PRECISIONS),
+                    default="auto",
+                    tooltip="Autocast dtype: auto is bfloat16 on GPU and float32 on CPU.",
+                    advanced=True,
+                ),
+            ],
+            outputs=[io.Float.Output("focal_length_px")],
+        )
+
+    @classmethod
+    def execute(cls, image, precision) -> io.NodeOutput:
+        device = mm.get_torch_device()
+        fov = _focal(str(device), precision)
+        transform = partial(to_normalized_tensor, device=device)
+        values = []
+        with torch.no_grad():
+            for frame in image:
+                values.append(fov.focal_length_px(_normalized(frame, transform)[None]).item())
+        return io.NodeOutput(float(np.median(values)))
+
+
 class DepthPro2Video(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -551,6 +611,7 @@ class DepthPro2Extension(ComfyExtension):
             DepthPro2ModelLoader,
             DepthPro2CoreMLModelLoader,
             DepthPro2Depth,
+            DepthPro2Focal,
             DepthPro2Video,
         ]
 
