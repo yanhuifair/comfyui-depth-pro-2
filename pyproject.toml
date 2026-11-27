@@ -1,7 +1,7 @@
 [project]
 name = "depth-pro-2" # the registry id, already reserved for this repository
-version = "1.2.0"
-description = "Apple Depth Pro 2 monocular depth for ComfyUI: sharp full-resolution depth from one photo, temporally consistent depth for video, standalone focal length estimation, and Apple's published Core ML packages on Apple silicon."
+version = "1.3.0"
+description = "Apple Depth Pro 2 monocular depth for ComfyUI: sharp full-resolution depth from one photo, temporally consistent depth for video, separate loaders for PyTorch and Core ML focal models, and Apple's published Core ML packages on Apple silicon."
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 # Keep in step with requirements.txt, which ComfyUI-Manager installs from.

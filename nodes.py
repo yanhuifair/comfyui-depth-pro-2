@@ -45,6 +45,8 @@ PRECISIONS = {
 }
 
 DepthPro2Model = io.Custom("DEPTH_PRO2_MODEL")
+DepthPro2FocalModel = io.Custom("DEPTH_PRO2_FOCAL_MODEL")
+DepthPro2FocalCoreMLModel = io.Custom("DEPTH_PRO2_FOCAL_COREML_MODEL")
 
 
 class DepthPro2Bundle(NamedTuple):
@@ -564,24 +566,19 @@ class DepthPro2Depth(io.ComfyNode):
         return io.NodeOutput(torch.stack(maps).to(mm.intermediate_device()))
 
 
-class DepthPro2Focal(io.ComfyNode):
+class DepthPro2FocalModelLoader(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="DepthPro2Focal",
-            display_name="Depth Pro 2 Focal",
-            category="depth",
+            node_id="DepthPro2FocalModelLoader",
+            display_name="Load Depth Pro 2 Focal Model",
+            category="model/loaders",
             description=(
-                "Estimate focal length in pixels from an image with Apple's standalone "
-                "DepthPro2-focal network. The checkpoint is downloaded into "
-                "models/depth_pro2 on first use; connect the output to a depth node's "
-                "focal_length_px input."
+                "Load Apple's standalone DepthPro2-focal weights with PyTorch. The checkpoint is "
+                "downloaded into models/depth_pro2 on first use; connect the output to Depth Pro 2 "
+                "Focal, and that node's output to a depth node's focal_length_px input."
             ),
             inputs=[
-                io.Image.Input(
-                    "image",
-                    tooltip="IMAGE batch; frames are estimated separately and the median is returned.",
-                ),
                 io.Combo.Input(
                     "precision",
                     options=list(PRECISIONS),
@@ -590,18 +587,42 @@ class DepthPro2Focal(io.ComfyNode):
                     advanced=True,
                 ),
             ],
+            outputs=[DepthPro2FocalModel.Output()],
+        )
+
+    @classmethod
+    def execute(cls, precision) -> io.NodeOutput:
+        return io.NodeOutput(_focal(str(mm.get_torch_device()), precision))
+
+
+class DepthPro2Focal(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="DepthPro2Focal",
+            display_name="Depth Pro 2 Focal",
+            category="depth",
+            description=(
+                "Estimate focal length in pixels from an image with a loaded DepthPro2-focal "
+                "model. Frames of a batch are estimated separately and the median is returned."
+            ),
+            inputs=[
+                DepthPro2FocalModel.Input("model"),
+                io.Image.Input(
+                    "image",
+                    tooltip="IMAGE batch; frames are estimated separately and the median is returned.",
+                ),
+            ],
             outputs=[io.Float.Output("focal_length_px")],
         )
 
     @classmethod
-    def execute(cls, image, precision) -> io.NodeOutput:
-        device = mm.get_torch_device()
-        fov = _focal(str(device), precision)
-        transform = partial(to_normalized_tensor, device=device)
+    def execute(cls, model, image) -> io.NodeOutput:
+        transform = partial(to_normalized_tensor, device=next(model.parameters()).device)
         values = []
         with torch.no_grad():
             for frame in image:
-                values.append(fov.focal_length_px(_normalized(frame, transform)[None]).item())
+                values.append(model.focal_length_px(_normalized(frame, transform)[None]).item())
         return io.NodeOutput(float(np.median(values)))
 
 
@@ -641,23 +662,18 @@ def _coreml_fov(compute_units: str):
     return model, name, data_type, dtype
 
 
-class DepthPro2FocalCoreML(io.ComfyNode):
+class DepthPro2FocalCoreMLLoader(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="DepthPro2FocalCoreML",
-            display_name="Depth Pro 2 Focal (Core ML)",
-            category="depth",
+            node_id="DepthPro2FocalCoreMLLoader",
+            display_name="Load Depth Pro 2 Focal Core ML",
+            category="model/loaders",
             description=(
-                "Estimate focal length in pixels with Apple's Core ML field-of-view package. "
-                "Frames are cover cropped to its fixed 896x512 input; the batch's median is "
-                "returned. The package is downloaded into models/depth_pro2 on first use."
+                "Download and load Apple's Core ML field-of-view package from "
+                "apple/DepthPro2-coreml. Connect the output to Depth Pro 2 Focal (Core ML)."
             ),
             inputs=[
-                io.Image.Input(
-                    "image",
-                    tooltip="IMAGE batch; frames are estimated separately and the median is returned.",
-                ),
                 io.Combo.Input(
                     "compute_units",
                     options=list(COMPUTE_UNITS),
@@ -666,13 +682,40 @@ class DepthPro2FocalCoreML(io.ComfyNode):
                     advanced=True,
                 ),
             ],
+            outputs=[DepthPro2FocalCoreMLModel.Output()],
+        )
+
+    @classmethod
+    def execute(cls, compute_units) -> io.NodeOutput:
+        return io.NodeOutput(_coreml_fov(compute_units))
+
+
+class DepthPro2FocalCoreML(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="DepthPro2FocalCoreML",
+            display_name="Depth Pro 2 Focal (Core ML)",
+            category="depth",
+            description=(
+                "Estimate focal length in pixels with a loaded Core ML field-of-view model. "
+                "Frames are cover cropped to its fixed 896x512 input; the batch's median is "
+                "returned."
+            ),
+            inputs=[
+                DepthPro2FocalCoreMLModel.Input("model"),
+                io.Image.Input(
+                    "image",
+                    tooltip="IMAGE batch; frames are estimated separately and the median is returned.",
+                ),
+            ],
             outputs=[io.Float.Output("focal_length_px")],
         )
 
     @classmethod
-    def execute(cls, image, compute_units) -> io.NodeOutput:
+    def execute(cls, model, image) -> io.NodeOutput:
         CoreML, _ = _coreml()
-        model, name, data_type, dtype = _coreml_fov(compute_units)
+        fov, name, data_type, dtype = model
         values = []
         for frame in image:
             x = _cover(_normalized(frame, _coreml_transform), *APPLE_FOV_SIZE)
@@ -682,12 +725,12 @@ class DepthPro2FocalCoreML(io.ComfyNode):
                 {name: CoreML.MLFeatureValue.featureValueWithMultiArray_(array)}, None))
             if features is None:
                 raise ValueError(f"Core ML could not bind the frame: {error}")
-            prediction, error = _objc(model.predictionFromFeatures_options_error_(features, None, None))
+            prediction, error = _objc(fov.predictionFromFeatures_options_error_(features, None, None))
             if prediction is None:
                 raise ValueError(f"Core ML inference failed: {error}")
-            fov = np.ascontiguousarray(
+            angles = np.ascontiguousarray(
                 _numpy_copy(prediction.featureValueForName_("fov").multiArrayValue()), dtype=np.float32)
-            values.append(median_focal_length_px(torch.from_numpy(fov), *APPLE_FOV_SIZE).item())
+            values.append(median_focal_length_px(torch.from_numpy(angles), *APPLE_FOV_SIZE).item())
         return io.NodeOutput(float(np.median(values)))
 
 
@@ -798,6 +841,8 @@ class DepthPro2Extension(ComfyExtension):
             DepthPro2ModelLoader,
             DepthPro2CoreMLModelLoader,
             DepthPro2AppleCoreMLLoader,
+            DepthPro2FocalModelLoader,
+            DepthPro2FocalCoreMLLoader,
             DepthPro2Depth,
             DepthPro2Focal,
             DepthPro2FocalCoreML,

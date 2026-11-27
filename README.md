@@ -41,12 +41,17 @@ node cache.
 
 ## Focal length
 
-**Depth Pro 2 Focal** runs Apple's standalone
-[DepthPro2-focal](https://huggingface.co/apple/DepthPro2-focal) estimator on an `IMAGE` and returns
-one `FLOAT` in pixels. Wire it into the `focal_length_px` socket of a depth node instead of guessing,
-or use the number for your own calibration. The 89 MB checkpoint downloads on first use into
-`models/depth_pro2/`. Frames of a batch are estimated one at a time; the returned value is their
-median. The estimator model is cached between runs, like the depth loader's weights.
+Focal estimation has its own loader nodes, just like depth:
+
+- **Load Depth Pro 2 Focal Model** → **Depth Pro 2 Focal** runs Apple's standalone
+  [DepthPro2-focal](https://huggingface.co/apple/DepthPro2-focal) weights with PyTorch. The 89 MB
+  checkpoint downloads on first use into `models/depth_pro2/`.
+- **Load Depth Pro 2 Focal Core ML** → **Depth Pro 2 Focal (Core ML)** runs Apple's Core ML
+  field-of-view package from the same repository as the Core ML depth packages.
+
+Both estimator nodes take an `IMAGE`, estimate each frame separately, return the batch's median as a
+`FLOAT` in pixels, and can feed a depth node's `focal_length_px` socket or your own calibration
+pipeline. The loaded model stays cached between runs, like the depth loader's weights.
 
 ## Video
 
@@ -114,9 +119,9 @@ Video** carries one state through the whole clip. `window`, `overlap` and `mode`
 Core ML. Memory grows quickly with the size: S needs about 1.5 GB at 854x480 and 5 GB at 1280x720;
 L about 4 GB and 18 GB. On a 16 GB Mac, stay with S or B at the default size.
 
-**Depth Pro 2 Focal (Core ML)** uses the field-of-view package from the same repository. It
-cover-crops each frame to 896x512, estimates a pixel focal length and returns the median over the
-batch; wire it into `focal_length_px` like the PyTorch focal node.
+**Load Depth Pro 2 Focal Core ML** loads the field-of-view package from the same repository into a
+`DEPTH_PRO2_FOCAL_COREML_MODEL` socket; **Depth Pro 2 Focal (Core ML)** then cover-crops each frame to 896x512,
+estimates a pixel focal length and returns the median over the batch.
 
 **Load Depth Pro 2 Core ML** lists the `.mlpackage` folders already in `models/depth_pro2/`,
 including Apple's downloaded packages and your own exports. To export your own at another size,
@@ -153,6 +158,7 @@ This is a way to run Depth Pro 2 outside PyTorch, not a speed-up. Measured with 
 | --- | --- | --- |
 | `model` | `depthpro2-h` | Preset, see above. |
 | `precision` | `auto` | Autocast dtype: `auto` is bfloat16 on GPU and float32 on CPU. Use `fp16` on GPUs without bfloat16. Advanced. |
+
 ### Load Depth Pro 2 Core ML
 
 | Input | Default | Description |
@@ -168,6 +174,22 @@ This is a way to run Depth Pro 2 outside PyTorch, not a speed-up. Measured with 
 | `resolution` | `default` | `res_<W>x<H>` function to run: `default` (854x480), `640x360`, `896x512`, `1138x640` or `1280x720`. The output has that size. |
 | `compute_units` | `gpu` | Where Core ML runs the package: `gpu`, `neural_engine`, `cpu` or `all`. Advanced. |
 
+### Load Depth Pro 2 Focal Model
+
+| Input | Default | Description |
+| --- | --- | --- |
+| `precision` | `auto` | Autocast dtype: `auto` is bfloat16 on GPU and float32 on CPU. Advanced. |
+
+Output: `DEPTH_PRO2_FOCAL_MODEL`, for **Depth Pro 2 Focal**.
+
+### Load Depth Pro 2 Focal Core ML
+
+| Input | Default | Description |
+| --- | --- | --- |
+| `compute_units` | `gpu` | Where Core ML runs the field-of-view package: `gpu`, `neural_engine`, `cpu` or `all`. Advanced. |
+
+Output: `DEPTH_PRO2_FOCAL_COREML_MODEL`, for **Depth Pro 2 Focal (Core ML)**.
+
 ### Depth Pro 2
 
 | Input | Default | Description |
@@ -182,8 +204,8 @@ This is a way to run Depth Pro 2 outside PyTorch, not a speed-up. Measured with 
 
 | Input | Default | Description |
 | --- | --- | --- |
+| `model` | — | `DEPTH_PRO2_FOCAL_MODEL` from **Load Depth Pro 2 Focal Model**. |
 | `image` | — | `IMAGE` batch, estimated one frame at a time. |
-| `precision` | `auto` | Autocast dtype: `auto` is bfloat16 on GPU and float32 on CPU. Advanced. |
 
 Output: `focal_length_px` (`FLOAT`), the median over the batch.
 
@@ -191,8 +213,8 @@ Output: `focal_length_px` (`FLOAT`), the median over the batch.
 
 | Input | Default | Description |
 | --- | --- | --- |
+| `model` | — | `DEPTH_PRO2_FOCAL_COREML_MODEL` from **Load Depth Pro 2 Focal Core ML**. |
 | `image` | — | `IMAGE` batch; frames are cover cropped to 896x512 and estimated one at a time. |
-| `compute_units` | `gpu` | Where Core ML runs the field-of-view package: `gpu`, `neural_engine`, `cpu` or `all`. Advanced. |
 
 Output: `focal_length_px` (`FLOAT`), the median over the batch.
 

@@ -38,11 +38,16 @@ ComfyUI 的节点缓存里，直到被缓存回收。
 
 ## 焦距
 
-**Depth Pro 2 Focal** 用 Apple 独立的
-[DepthPro2-focal](https://huggingface.co/apple/DepthPro2-focal) 模型从 `IMAGE` 估焦距，输出一个以像素为单位的
-`FLOAT`。把它接到深度节点的 `focal_length_px` 输入口，就不用手填估算值，也能拿这个数做自己的标定。
-89 MB 的权重首次使用时下载到 `models/depth_pro2/`。批次里的帧逐张推理，返回它们的中位数；估计器模型会
-像深度加载器的权重一样被缓存复用。
+焦距模型和深度模型一样，有独立的加载器节点：
+
+- **Load Depth Pro 2 Focal Model** → **Depth Pro 2 Focal**：用 PyTorch 跑 Apple 独立的
+  [DepthPro2-focal](https://huggingface.co/apple/DepthPro2-focal) 权重，89 MB 权重首次使用时下载到
+  `models/depth_pro2/`。
+- **Load Depth Pro 2 Focal Core ML** → **Depth Pro 2 Focal (Core ML)**：用 Apple Core ML 深度包同仓库里的
+  视场角包。
+
+两个估焦距节点都只吃 `IMAGE`，逐帧推理后返回批次中位数（以像素为单位的 `FLOAT`），可以接到深度节点的
+`focal_length_px` 输入口，也能拿这个数做自己的标定。加载好的模型会像深度加载器一样缓存复用。
 
 ## 视频
 
@@ -102,8 +107,8 @@ Python 侧的桥接层已写进 `requirements.txt`；Apple 官方包已在本机
 无效。显存随尺寸涨得很快：S 在 854x480 约 1.5 GB、1280x720 约 5 GB；L 分别约 4 GB 和 18 GB。
 16 GB 的 Mac 建议用 S 或 B，并保持默认尺寸。
 
-**Depth Pro 2 Focal (Core ML)** 用同一个仓库里的视场角包：把每帧放大裁剪到 896x512，估出以像素为单位
-的焦距，返回批次中位数；可以像 PyTorch 焦距节点一样接到 `focal_length_px`。
+**Load Depth Pro 2 Focal Core ML** 把同一个仓库里的视场角包加载成 `DEPTH_PRO2_FOCAL_COREML_MODEL`，
+**Depth Pro 2 Focal (Core ML)** 再把每帧放大裁剪到 896x512，估出以像素为单位的焦距，返回批次中位数。
 
 **Load Depth Pro 2 Core ML** 列出 `models/depth_pro2/` 里已有的 `.mlpackage`，包括下载好的官方包和自己
 导出的包。想导出别的尺寸，coremltools 在 Python 3.13 之后没有 wheel，所以导出得用旧解释器——`uv`
@@ -153,6 +158,22 @@ uv run --python 3.13 --with coremltools --with timm --with av \
 | `resolution` | `default` | 要运行的 `res_<W>x<H>` 函数：`default`（854x480）、`640x360`、`896x512`、`1138x640`、`1280x720`；输出即该尺寸。 |
 | `compute_units` | `gpu` | Core ML 的运行设备：`gpu`、`neural_engine`、`cpu` 或 `all`。高级选项。 |
 
+### Load Depth Pro 2 Focal Model
+
+| 输入 | 默认 | 说明 |
+| --- | --- | --- |
+| `precision` | `auto` | autocast 精度：`auto` 在 GPU 上为 bfloat16、CPU 上为 float32。高级选项。 |
+
+输出：`DEPTH_PRO2_FOCAL_MODEL`，供 **Depth Pro 2 Focal** 使用。
+
+### Load Depth Pro 2 Focal Core ML
+
+| 输入 | 默认 | 说明 |
+| --- | --- | --- |
+| `compute_units` | `gpu` | Core ML 的运行设备：`gpu`、`neural_engine`、`cpu` 或 `all`。高级选项。 |
+
+输出：`DEPTH_PRO2_FOCAL_COREML_MODEL`，供 **Depth Pro 2 Focal (Core ML)** 使用。
+
 ### Depth Pro 2
 
 | 输入 | 默认 | 说明 |
@@ -167,8 +188,8 @@ uv run --python 3.13 --with coremltools --with timm --with av \
 
 | 输入 | 默认 | 说明 |
 | --- | --- | --- |
+| `model` | — | **Load Depth Pro 2 Focal Model** 输出的 `DEPTH_PRO2_FOCAL_MODEL`。 |
 | `image` | — | `IMAGE` 批次，逐帧推理。 |
-| `precision` | `auto` | autocast 精度：`auto` 在 GPU 上为 bfloat16、CPU 上为 float32。高级选项。 |
 
 输出：`focal_length_px`（`FLOAT`），批次的中位数。
 
@@ -176,8 +197,8 @@ uv run --python 3.13 --with coremltools --with timm --with av \
 
 | 输入 | 默认 | 说明 |
 | --- | --- | --- |
+| `model` | — | **Load Depth Pro 2 Focal Core ML** 输出的 `DEPTH_PRO2_FOCAL_COREML_MODEL`。 |
 | `image` | — | `IMAGE` 批次；每帧放大裁剪到 896x512 后逐帧推理。 |
-| `compute_units` | `gpu` | Core ML 的运行设备：`gpu`、`neural_engine`、`cpu` 或 `all`。高级选项。 |
 
 输出：`focal_length_px`（`FLOAT`），批次的中位数。
 
